@@ -18,7 +18,9 @@ use codex_api::ResponseEvent;
 use codex_api::ResponsesClient;
 use codex_api::RetryConfig;
 use codex_api::SharedAuthProvider;
+use codex_http_client::HttpClientFactory;
 use codex_http_client::HttpTransport;
+use codex_http_client::OutboundProxyPolicy;
 use codex_http_client::Request;
 use codex_http_client::RequestBody;
 use codex_http_client::ReqwestTransport;
@@ -342,12 +344,17 @@ impl Client {
             .await
             .ok_or_else(|| UpstreamError::local("not signed in"))?;
         let mut headers = HeaderMap::new();
+        headers.extend(default_client::default_headers());
         apply_auth_headers(&auth, &mut headers);
-        let url = format!("{CHATGPT_BASE_URL}/wham/usage");
-        let request = Request::new(Method::GET, url).with_raw_body(Vec::<u8>::new());
-        let mut request = request;
+        let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
+        let http = default_client::create_client_with_chatgpt_cookies(&factory);
+        let client = ReqwestTransport::from_http_client(http);
+        let mut request = Request::new(
+            Method::GET,
+            "https://chatgpt.com/backend-api/wham/usage".to_string(),
+        );
         request.headers = headers;
-        let response = transport()
+        let response = client
             .execute(request)
             .await
             .map_err(|err| UpstreamError::local(format!("usage request failed: {err}")))?;
