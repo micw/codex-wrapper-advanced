@@ -16,7 +16,11 @@ use clap::Parser;
 use clap::Subcommand;
 
 /// Default model. Changeable via `--model`; `models` lists what the subscription offers.
-const DEFAULT_MODEL: &str = "gpt-5.2-codex";
+///
+/// Measured 2026-08-24: the `gpt-5.x-codex` slugs from the prompt files in the
+/// upstream repo no longer exist. The backend serves gpt-5.6-{sol,terra,luna},
+/// gpt-5.5, gpt-5.4{,-mini}. Run `models` before changing this.
+const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 
 /// Appended to `/models` as the `client_version` query parameter. Taken from the
 /// most recent upstream release tag, because the repo checkout itself carries
@@ -64,8 +68,9 @@ enum Command {
         #[arg(long, conflicts_with = "instructions_file")]
         instructions: Option<String>,
 
-        /// `instructions` from a file, e.g.
-        /// `../codex/codex-rs/core/gpt-5.2-codex_prompt.md`.
+        /// `instructions` from a file. The official prompts now ship from the
+        /// backend itself (`models` -> `model_messages.instructions_template`);
+        /// the files under `../codex/codex-rs/core/` are leftovers.
         #[arg(long)]
         instructions_file: Option<String>,
 
