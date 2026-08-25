@@ -43,6 +43,7 @@ use axum::Json;
 use axum::Router;
 use axum::extract::Query;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -253,7 +254,12 @@ async fn auth_status(
     }
     match auth::status(&state.manager).await {
         Ok(status) => Json(status).into_response(),
-        Err(err) => error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+        Err(err) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &err.to_string(),
+            "server_error",
+            Some("internal_error"),
+        ),
     }
 }
 
@@ -358,15 +364,39 @@ async fn responses(
 async fn openai_chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<crate::openai_chat::ChatRequest>,
+    request: Result<Json<crate::openai_chat::ChatRequest>, JsonRejection>,
 ) -> axum::response::Response {
     let Some(caller) = state.keys.authenticate(&headers) else {
         return unauthorized();
     };
+    let request = match request {
+        Ok(Json(request)) => request,
+        Err(rejection) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                &rejection.body_text(),
+                "invalid_request_error",
+                None,
+            );
+        }
+    };
+
+    let include_usage = request
+        .stream_options
+        .as_ref()
+        .is_some_and(|options| options.include_usage);
+    let streaming = request.stream.unwrap_or(false);
 
     let wire = match crate::openai_chat::to_wire(&request) {
         Ok(wire) => wire,
-        Err(message) => return error(StatusCode::BAD_REQUEST, &message),
+        Err(message) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                &message,
+                "invalid_request_error",
+                None,
+            );
+        }
     };
 
     let stream = match state.client.stream(wire).await {
@@ -382,8 +412,24 @@ async fn openai_chat_completions(
     let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
     let model = request.model;
 
+    if !streaming {
+        let mut state = crate::openai_chat::ChatResponseState::default();
+        let mut events = stream;
+        while let Some(event) = events.next().await {
+            state.apply(&event, &id, &model, false);
+            if state.failed.is_some() {
+                break;
+            }
+        }
+        if let Some((message, retryable)) = state.failed {
+            return upstream_chat_error(&message, retryable);
+        }
+        return Json(state.response(&id, &model)).into_response();
+    }
+
+    let mut state = crate::openai_chat::ChatResponseState::default();
     let sse = stream.flat_map(move |event| {
-        let lines = crate::openai_chat::from_wire(&event, &id, &model);
+        let lines = state.apply(&event, &id, &model, include_usage);
         futures::stream::iter(
             lines
                 .into_iter()
@@ -392,6 +438,25 @@ async fn openai_chat_completions(
     });
 
     Sse::new(sse).into_response()
+}
+
+fn upstream_chat_error(message: &str, retryable: bool) -> axum::response::Response {
+    let status = if retryable {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::BAD_GATEWAY
+    };
+    (
+        status,
+        Json(json!({
+            "error": {
+                "message": message,
+                "type": "api_error",
+                "code": "upstream_error"
+            }
+        })),
+    )
+        .into_response()
 }
 
 /// Passes the upstream's status through.
@@ -406,15 +471,44 @@ fn upstream_error(err: &crate::client::UpstreamError) -> axum::response::Respons
         .unwrap_or(StatusCode::BAD_GATEWAY);
     (
         status,
-        Json(json!({ "error": err.message, "upstream_status": err.status })),
+        Json(json!({
+            "error": {
+                "message": err.message,
+                "type": "api_error",
+                "param": null,
+                "code": "upstream_error",
+                "upstream_status": err.status,
+            }
+        })),
     )
         .into_response()
 }
 
 fn unauthorized() -> axum::response::Response {
-    error(StatusCode::UNAUTHORIZED, "invalid or missing API key")
+    error(
+        StatusCode::UNAUTHORIZED,
+        "invalid or missing API key",
+        "invalid_request_error",
+        Some("invalid_api_key"),
+    )
 }
 
-fn error(status: StatusCode, message: &str) -> axum::response::Response {
-    (status, Json(json!({ "error": message }))).into_response()
+fn error(
+    status: StatusCode,
+    message: &str,
+    error_type: &str,
+    code: Option<&str>,
+) -> axum::response::Response {
+    (
+        status,
+        Json(json!({
+            "error": {
+                "message": message,
+                "type": error_type,
+                "param": null,
+                "code": code,
+            }
+        })),
+    )
+        .into_response()
 }

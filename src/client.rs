@@ -138,7 +138,10 @@ pub fn build_body(req: &StreamRequest) -> Value {
     let mut body = json!({
         "model": req.model,
         "input": req.input,
-        "tool_choice": req.tool_choice.clone().unwrap_or_else(|| "auto".to_string()),
+        "tool_choice": req
+            .tool_choice
+            .clone()
+            .unwrap_or_else(|| json!("auto")),
         "parallel_tool_calls": req.parallel_tool_calls.unwrap_or(false),
         "store": req.store.unwrap_or(false),
         "stream": true,
@@ -324,10 +327,13 @@ fn map_events(
     upstream.flat_map(move |item| {
         let events = match item {
             Ok(event) => map_one(event, &state),
-            Err(err) => vec![Event::Failed {
-                message: format!("{err:?}"),
-                retryable: false,
-            }],
+            Err(err) => {
+                let error = UpstreamError::from(err);
+                vec![Event::Failed {
+                    retryable: matches!(error.status, Some(429 | 503)),
+                    message: error.message,
+                }]
+            }
         };
         futures::stream::iter(events)
     })

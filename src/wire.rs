@@ -122,7 +122,7 @@ pub struct StreamRequest {
     #[serde(default)]
     pub effort: Option<String>,
     #[serde(default)]
-    pub tool_choice: Option<String>,
+    pub tool_choice: Option<serde_json::Value>,
     #[serde(default)]
     pub parallel_tool_calls: Option<bool>,
     #[serde(default)]
