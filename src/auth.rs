@@ -18,8 +18,12 @@ use codex_login::AuthRouteConfig;
 use codex_login::CLIENT_ID;
 use codex_login::CodexAuth;
 use codex_login::ServerOptions;
+use codex_login::load_auth_dot_json;
 use codex_login::logout_with_revoke;
+use codex_login::request_device_code;
+use codex_login::run_device_code_login;
 use codex_login::run_login_server;
+use codex_login::token_data::parse_jwt_expiration;
 
 /// Our own credential directory, deliberately separate from `~/.codex`.
 ///
@@ -65,8 +69,8 @@ pub async fn login() -> Result<()> {
 
     // Discard previous credentials, otherwise a stale refresh token gets mixed
     // into the new flow. Failure is not fatal here (e.g. nothing to delete).
-    if let Err(err) = logout_with_revoke(&codex_home, STORE_MODE, keyring_kind(), &route_config())
-        .await
+    if let Err(err) =
+        logout_with_revoke(&codex_home, STORE_MODE, keyring_kind(), &route_config()).await
     {
         eprintln!("Note: existing credentials were not cleanly removed: {err}");
     }
@@ -85,12 +89,58 @@ pub async fn login() -> Result<()> {
 
     let server = run_login_server(opts)?;
 
-    eprintln!("Callback server listening on 127.0.0.1:{}", server.actual_port);
+    eprintln!(
+        "Callback server listening on 127.0.0.1:{}",
+        server.actual_port
+    );
     eprintln!("Login URL (open in a browser):\n\n{}\n", server.auth_url);
     eprintln!("Waiting for the callback ...");
 
     server.block_until_done().await?;
-    eprintln!("Login complete. Credentials in {}", codex_home.display());
+    eprintln!(
+        "Login complete. Credentials in {}",
+        codex_home.display()
+    );
+    Ok(())
+}
+
+/// Device code flow: sign-in without a local browser and without a callback port.
+///
+/// For containers and remote machines this is the right way — there is no
+/// `redirect_uri` that would have to point at `localhost:1455`. The user opens a
+/// URL on any device and types in a code.
+///
+/// `probe_only` requests a code and stops there. That makes it possible to check
+/// whether the flow is enabled for this account at all without forcing a
+/// sign-in.
+pub async fn login_device(probe_only: bool) -> Result<()> {
+    let codex_home = home()?;
+    std::fs::create_dir_all(&codex_home)
+        .with_context(|| format!("creating CODEX_HOME: {}", codex_home.display()))?;
+
+    let opts = ServerOptions::new(
+        codex_home.clone(),
+        CLIENT_ID.to_string(),
+        None,
+        STORE_MODE,
+        keyring_kind(),
+        route_config(),
+    );
+
+    if probe_only {
+        let code = request_device_code(&opts).await?;
+        println!("Device code flow is available.");
+        println!("  URL : {}", code.verification_url);
+        println!("  Code: {}", code.user_code);
+        println!("(probe only — nothing was signed in)");
+        return Ok(());
+    }
+
+    run_device_code_login(opts).await?;
+    eprintln!(
+        "Login complete. Credentials in {}",
+        codex_home.display()
+    );
     Ok(())
 }
 
@@ -130,11 +180,53 @@ pub async fn current_auth(manager: &AuthManager) -> Result<CodexAuth> {
         .context("not signed in — run `codex-api-wrapper login` first")
 }
 
-/// Auth state as a data structure, for `GET /auth`.
+/// Operational readiness — the basis of the readiness probe.
 ///
-/// Deliberately contains **no** token. The daemon never hands out credentials;
-/// whoever reaches the endpoint should learn *whether* and *as whom* we are
-/// signed in, not with what.
+/// Checks three things, in this order:
+///
+/// 1. **Signed in?** After a first rollout usually not yet.
+/// 2. **Refresh permanently failed?** `auth()` swallows refresh errors and
+///    returns the cached auth (see DEPLOY.md §1) — from the outside that state is
+///    otherwise invisible. `refresh_failure_for_auth` is the only place it
+///    surfaces.
+/// 3. **Access token still valid?** Catches the case where the refresh was never
+///    attempted, e.g. because the process only started after expiry.
+pub async fn readiness(manager: &AuthManager) -> crate::wire::ReadyStatus {
+    let not_ready = |reason, detail, secs| crate::wire::ReadyStatus {
+        ready: false,
+        reason,
+        detail,
+        access_token_expires_in_seconds: secs,
+    };
+
+    let Some(auth) = manager.auth().await else {
+        return not_ready("not_authenticated", None, None);
+    };
+    if !auth.is_chatgpt_auth() {
+        return not_ready("not_authenticated", None, None);
+    }
+
+    let expires_in = auth
+        .get_token_data()
+        .ok()
+        .and_then(|tokens| parse_jwt_expiration(&tokens.access_token).ok().flatten())
+        .map(|at| (at - chrono::Utc::now()).num_seconds());
+
+    if let Some(failure) = manager.refresh_failure_for_auth(&auth) {
+        return not_ready("refresh_failed", Some(failure.message), expires_in);
+    }
+    if expires_in.is_some_and(|secs| secs <= 0) {
+        return not_ready("token_expired", None, expires_in);
+    }
+
+    crate::wire::ReadyStatus {
+        ready: true,
+        reason: "ok",
+        detail: None,
+        access_token_expires_in_seconds: expires_in,
+    }
+}
+
 pub async fn status(manager: &AuthManager) -> Result<crate::wire::AuthStatus> {
     let Some(auth) = manager.auth().await else {
         return Ok(crate::wire::AuthStatus {
@@ -145,8 +237,29 @@ pub async fn status(manager: &AuthManager) -> Result<crate::wire::AuthStatus> {
             chatgpt_user_id: None,
             workspace_account: false,
             fedramp: false,
+            access_token_expires_at: None,
+            access_token_expires_in_seconds: None,
+            last_refresh: None,
+            last_refresh_age_seconds: None,
         });
     };
+
+    let now = chrono::Utc::now();
+
+    // The expiry lives in the access token's JWT.
+    let expires_at = auth
+        .get_token_data()
+        .ok()
+        .and_then(|tokens| parse_jwt_expiration(&tokens.access_token).ok().flatten());
+
+    // `last_refresh` hangs off AuthDotJson, not TokenData, and reaching it
+    // through CodexAuth is private upstream. So read from disk once — cheap
+    // enough for a status endpoint.
+    let last_refresh = load_auth_dot_json(&home()?, STORE_MODE, keyring_kind())
+        .ok()
+        .flatten()
+        .and_then(|auth_json| auth_json.last_refresh);
+
     Ok(crate::wire::AuthStatus {
         authenticated: auth.is_chatgpt_auth(),
         account_id: auth.get_account_id(),
@@ -155,6 +268,10 @@ pub async fn status(manager: &AuthManager) -> Result<crate::wire::AuthStatus> {
         chatgpt_user_id: auth.get_chatgpt_user_id(),
         workspace_account: auth.is_workspace_account(),
         fedramp: auth.is_fedramp_account(),
+        access_token_expires_at: expires_at.map(|at| at.to_rfc3339()),
+        access_token_expires_in_seconds: expires_at.map(|at| (at - now).num_seconds()),
+        last_refresh: last_refresh.map(|at| at.to_rfc3339()),
+        last_refresh_age_seconds: last_refresh.map(|at| (now - at).num_seconds()),
     })
 }
 
@@ -179,7 +296,11 @@ pub async fn whoami() -> Result<()> {
     match auth.get_token() {
         // Never print the whole token — it would end up in terminal scrollback
         // and in every log that records this.
-        Ok(token) => println!("Access token    : {} ... ({} characters)", &token[..token.len().min(12)], token.len()),
+        Ok(token) => println!(
+            "Access token    : {} ... ({} characters)",
+            &token[..token.len().min(12)],
+            token.len()
+        ),
         Err(err) => println!("Access token    : not available ({err})"),
     }
     Ok(())

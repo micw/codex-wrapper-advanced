@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: fmt, clippy, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: codex-api-wrapper
+
+      # The clone has to sit NEXT TO the project — Cargo.toml points at
+      # ../codex/codex-rs/*. Pinned commit from CODEX_REV, otherwise no build
+      # would be reproducible.
+      - name: Fetch openai/codex at the pinned commit
+        run: |
+          set -eux
+          rev="$(tr -d '[:space:]' < codex-api-wrapper/CODEX_REV)"
+          mkdir codex && cd codex
+          git init -q .
+          git remote add origin https://github.com/openai/codex.git
+          git fetch -q --depth 1 origin "$rev"
+          git checkout -q FETCH_HEAD
+
+      # The version lives in ../codex/codex-rs/rust-toolchain.toml. Stated
+      # explicitly here, because rust-toolchain.toml only applies inside the codex
+      # directory and our project sits next to it.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: codex-api-wrapper
+
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+
+      - name: fmt
+        working-directory: codex-api-wrapper
+        run: cargo fmt --check
+
+      - name: clippy
+        working-directory: codex-api-wrapper
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: build
+        working-directory: codex-api-wrapper
+        run: cargo build --release --locked
+
+      # Anything needing real credentials (scripts/measure.py) does NOT belong in
+      # CI: it spends subscription quota and requires an interactive sign-in.
+      - name: test
+        working-directory: codex-api-wrapper
+        run: cargo test --locked
+
+      - name: Smoke test (without a login)
+        working-directory: codex-api-wrapper
+        run: |
+          ./target/release/codex-api-wrapper --help
+          # Without credentials `whoami` must fail cleanly, not crash.
+          if ./target/release/codex-api-wrapper whoami; then
+            echo "FAIL: whoami succeeded without a login"; exit 1
+          fi
+
+  docker:
+    name: Build image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # Build only, do not push: the image contains no credentials, but there is
+      # no registry yet and no reason to publish one.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

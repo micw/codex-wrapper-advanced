@@ -134,6 +134,10 @@ pub struct StreamRequest {
 }
 
 /// Auth state for `GET /wire/v1/auth`.
+///
+/// Never contains a token — only **whether** and **as whom** we are signed in,
+/// plus the deadlines. The latter make the refresh cycle observable instead of
+/// noticing it only when it fails (DEPLOY.md §1).
 #[derive(Debug, Clone, Serialize)]
 pub struct AuthStatus {
     pub authenticated: bool,
@@ -143,6 +147,44 @@ pub struct AuthStatus {
     pub chatgpt_user_id: Option<String>,
     pub workspace_account: bool,
     pub fedramp: bool,
+
+    /// Access token expiry (RFC 3339). Measured lifetime: 10 days. `codex-login`
+    /// refreshes 5 minutes before that — but only when someone calls `auth()`;
+    /// there is no background timer.
+    pub access_token_expires_at: Option<String>,
+    /// Seconds until then. Negative means already expired, and the next call
+    /// triggers the refresh.
+    pub access_token_expires_in_seconds: Option<i64>,
+    /// Timestamp of the last successful refresh (RFC 3339).
+    ///
+    /// **The genuinely interesting value.** Once its distance from now exceeds
+    /// the token lifetime, a refresh is either due or has failed. The *refresh*
+    /// token's own lifetime cannot be determined from outside (opaque,
+    /// server-side) — observing is the only means.
+    pub last_refresh: Option<String>,
+    pub last_refresh_age_seconds: Option<i64>,
+}
+
+/// Response of `GET /ready`.
+///
+/// Separate from `/health`, and that is not cosmetic: tie **liveness** to the
+/// sign-in state and Kubernetes will kill the container in a loop before anyone
+/// can exec in and sign in. `/health` therefore only says "the process is
+/// alive", `/ready` says "it can work".
+///
+/// Needs no key — a probe cannot send one. It therefore carries operational
+/// state only, no identity.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadyStatus {
+    pub ready: bool,
+    /// `ok` | `not_authenticated` | `refresh_failed` | `token_expired`
+    pub reason: &'static str,
+    /// The upstream's own wording on `refresh_failed` — it says whether the token
+    /// expired, was already used, or was revoked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_token_expires_in_seconds: Option<i64>,
 }
 
 /// Written to stdout on startup so the parent process learns port and token.

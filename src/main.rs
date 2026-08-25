@@ -38,7 +38,16 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Official ChatGPT OAuth flow (PKCE, local callback server).
-    Login,
+    Login {
+        /// Device code flow instead of a callback server — for containers and
+        /// remote machines where `localhost:1455` is not reachable.
+        #[arg(long)]
+        device: bool,
+
+        /// Only check whether the device flow is enabled. Signs nothing in.
+        #[arg(long, requires = "device")]
+        probe: bool,
+    },
     /// Revoke tokens and delete local credentials.
     Logout,
     /// Shows the current auth state (plan, account, token length).
@@ -53,6 +62,17 @@ enum Command {
         /// Also write to this file (mode 0600).
         #[arg(long)]
         server_info: Option<PathBuf>,
+
+        /// Bind address. Loopback by default. `0.0.0.0` makes the daemon
+        /// reachable from other network namespaces — needed in a container when it
+        /// is NOT a sidecar. See DEPLOY.md.
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: std::net::IpAddr,
+
+        /// A fixed port instead of an ephemeral one. Useful in a container,
+        /// where a port gets mapped anyway.
+        #[arg(long, default_value_t = 0)]
+        port: u16,
     },
     /// Issue a single Responses request.
     Ask {
@@ -106,10 +126,29 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Login => auth::login().await,
+        Command::Login { device, probe } => {
+            if device {
+                auth::login_device(probe).await
+            } else {
+                auth::login().await
+            }
+        }
         Command::Logout => auth::logout().await,
         Command::Whoami => auth::whoami().await,
-        Command::Serve { server_info } => serve::run(server_info).await,
+        Command::Serve {
+            server_info,
+            bind,
+            port,
+        } => {
+            serve::run(
+                server_info,
+                serve::BindConfig {
+                    address: bind,
+                    port,
+                },
+            )
+            .await
+        }
         Command::Models { client_version } => {
             let manager = auth::auth_manager().await?;
             auth::current_auth(&manager).await?;

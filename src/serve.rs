@@ -20,6 +20,7 @@
 //! `server-info` file — it stops an arbitrary other process on the machine from
 //! simply using the port.
 
+use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -82,7 +83,29 @@ fn authorized(headers: &HeaderMap, expected: &str) -> bool {
             == 0
 }
 
-pub async fn run(server_info: Option<PathBuf>) -> Result<()> {
+/// Where to bind.
+///
+/// Loopback by default. Inside a container that means "reachable only within this
+/// network namespace" — exactly right for a Kubernetes **sidecar**, because
+/// containers of one pod share localhost. Only when the daemon has to be reachable
+/// from another namespace is `--bind` needed; the token is then the sole remaining
+/// barrier. See DEPLOY.md.
+pub struct BindConfig {
+    pub address: IpAddr,
+    pub port: u16,
+}
+
+impl Default for BindConfig {
+    fn default() -> Self {
+        Self {
+            address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            // 0 = the operating system picks a free port.
+            port: 0,
+        }
+    }
+}
+
+pub async fn run(server_info: Option<PathBuf>, bind: BindConfig) -> Result<()> {
     let manager = auth::auth_manager().await?;
     let token = mint_token();
     let state = AppState {
@@ -93,15 +116,24 @@ pub async fn run(server_info: Option<PathBuf>) -> Result<()> {
 
     let app = Router::new()
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .route("/auth", get(auth_status))
         .route("/models", get(models))
         .route("/responses", post(responses))
         .with_state(state);
 
-    // Port 0 = the operating system picks a free one.
-    let listener = tokio::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+    if !bind.address.is_loopback() {
+        eprintln!(
+            "WARNING: listening on {} - the daemon is reachable outside this machine \
+             reachable. The bearer token is the only barrier. Anyone exposing the endpoint \
+             to other people shares their ChatGPT account \
+             with them.",
+            bind.address
+        );
+    }
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from((bind.address, bind.port)))
         .await
-        .context("binding to 127.0.0.1 failed")?;
+        .with_context(|| format!("binding to {}:{} failed", bind.address, bind.port))?;
     let port = listener.local_addr()?.port();
 
     let info = ServerInfo {
@@ -128,18 +160,54 @@ pub async fn run(server_info: Option<PathBuf>) -> Result<()> {
     use std::io::Write as _;
     std::io::stdout().flush()?;
 
-    eprintln!("codex-api-wrapper serve: http://127.0.0.1:{port}");
+    eprintln!("codex-api-wrapper serve: http://{}:{port}", bind.address);
     axum::serve(listener, app).await.context("HTTP server")?;
     Ok(())
 }
 
 // --- Handlers --------------------------------------------------------------
 
-async fn health() -> impl IntoResponse {
-    Json(json!({ "status": "ok" }))
+/// Readiness — can the daemon work?
+///
+/// `200` if yes, `503` if no. No token required, because a Kubernetes probe
+/// cannot send one; the body therefore carries operational state only, no
+/// identity.
+///
+/// This probe catches the case `/health` cannot see: `auth()` swallows refresh
+/// errors and keeps reporting a valid sign-in while the refresh has long since
+/// failed for good (DEPLOY.md §1).
+async fn ready(State(state): State<AppState>) -> axum::response::Response {
+    let status = auth::readiness(&state.manager).await;
+    let code = if status.ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (code, Json(status)).into_response()
 }
 
-async fn auth_status(State(state): State<AppState>, headers: HeaderMap) -> axum::response::Response {
+/// Lebenszeichen, ohne Token.
+///
+/// **Always** answers `200` while the process is alive — that is the point. Tie
+/// liveness to the sign-in state and Kubernetes will kill the container in a
+/// loop before anybody can exec in and sign in.
+///
+/// `authenticated` is a hint for the eye only. The readiness probe is `/ready`'s
+/// job: `authenticated` stays `true` even when the refresh fails permanently.
+async fn health(State(state): State<AppState>) -> impl IntoResponse {
+    let authenticated = state
+        .manager
+        .auth()
+        .await
+        .map(|auth| auth.is_chatgpt_auth())
+        .unwrap_or(false);
+    Json(json!({ "status": "ok", "authenticated": authenticated }))
+}
+
+async fn auth_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> axum::response::Response {
     if !authorized(&headers, &state.token) {
         return unauthorized();
     }
