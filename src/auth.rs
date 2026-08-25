@@ -130,6 +130,34 @@ pub async fn current_auth(manager: &AuthManager) -> Result<CodexAuth> {
         .context("not signed in — run `codex-api-wrapper login` first")
 }
 
+/// Auth state as a data structure, for `GET /auth`.
+///
+/// Deliberately contains **no** token. The daemon never hands out credentials;
+/// whoever reaches the endpoint should learn *whether* and *as whom* we are
+/// signed in, not with what.
+pub async fn status(manager: &AuthManager) -> Result<crate::wire::AuthStatus> {
+    let Some(auth) = manager.auth().await else {
+        return Ok(crate::wire::AuthStatus {
+            authenticated: false,
+            account_id: None,
+            email: None,
+            plan: None,
+            chatgpt_user_id: None,
+            workspace_account: false,
+            fedramp: false,
+        });
+    };
+    Ok(crate::wire::AuthStatus {
+        authenticated: auth.is_chatgpt_auth(),
+        account_id: auth.get_account_id(),
+        email: auth.get_account_email(),
+        plan: auth.account_plan_type().map(|p| format!("{p:?}")),
+        chatgpt_user_id: auth.get_chatgpt_user_id(),
+        workspace_account: auth.is_workspace_account(),
+        fedramp: auth.is_fedramp_account(),
+    })
+}
+
 pub async fn whoami() -> Result<()> {
     let manager = auth_manager().await?;
     let auth = current_auth(&manager).await?;

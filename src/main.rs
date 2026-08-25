@@ -1,36 +1,34 @@
-//! codex-api-wrapper — proof of concept.
+//! CLI shell around [`codex_api_wrapper`].
 //!
-//! Goal at this stage: run the official ChatGPT auth flow against the Codex
-//! crates and then be able to issue requests, so the open questions from
-//! KONTEXT-HARNESS.md 8.3/10 can be *measured* instead of researched.
-//!
-//! What this deliberately is NOT yet: a server, a process pool, an
-//! OpenAI-compatible translation. That only comes once it is settled whether the
-//! provider contract (own tools, client executes them) is satisfiable at all.
+//! Argument handling and presentation only. Anything the daemon needs as well
+//! lives in the library.
 
-mod chatgpt;
-mod session;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
 
+use anyhow::Context as _;
 use anyhow::Result;
+use anyhow::bail;
 use clap::Parser;
 use clap::Subcommand;
-
-/// Default model. Changeable via `--model`; `models` lists what the subscription offers.
-///
-/// Measured 2026-08-24: the `gpt-5.x-codex` slugs from the prompt files in the
-/// upstream repo no longer exist. The backend serves gpt-5.6-{sol,terra,luna},
-/// gpt-5.5, gpt-5.4{,-mini}. Run `models` before changing this.
-const DEFAULT_MODEL: &str = "gpt-5.6-sol";
-
-/// Appended to `/models` as the `client_version` query parameter. Taken from the
-/// most recent upstream release tag, because the repo checkout itself carries
-/// `0.0.0` (the real version is only substituted at release time).
-const DEFAULT_CLIENT_VERSION: &str = "0.150.0";
+use codex_api_wrapper::DEFAULT_CLIENT_VERSION;
+use codex_api_wrapper::DEFAULT_MODEL;
+use codex_api_wrapper::auth;
+use codex_api_wrapper::client::Client;
+use codex_api_wrapper::client::build_body;
+use codex_api_wrapper::client::raw_stream;
+use codex_api_wrapper::serve;
+use codex_api_wrapper::user_input;
+use codex_api_wrapper::wire::Event;
+use codex_api_wrapper::wire::StreamRequest;
+use futures::StreamExt;
+use serde_json::Value;
 
 #[derive(Parser)]
 #[command(
     name = "codex-api-wrapper",
-    about = "Proof of concept: reach the ChatGPT subscription via the official Codex crates"
+    about = "The ChatGPT subscription via the official Codex crates"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -50,6 +48,12 @@ enum Command {
         #[arg(long, default_value = DEFAULT_CLIENT_VERSION)]
         client_version: String,
     },
+    /// Start the local REST API. One process, arbitrarily many requests.
+    Serve {
+        /// Also write to this file (mode 0600).
+        #[arg(long)]
+        server_info: Option<PathBuf>,
+    },
     /// Issue a single Responses request.
     Ask {
         /// The user prompt.
@@ -58,19 +62,18 @@ enum Command {
         #[arg(long, default_value = DEFAULT_MODEL)]
         model: String,
 
-        /// Reasoning effort (`low`, `medium`, `high`, ...). Without it no
-        /// `reasoning` field is sent.
+        /// Reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`, `ultra`).
+        /// Without it no `reasoning` field is sent.
         #[arg(long)]
         effort: Option<String>,
 
-        /// `instructions` as text. Without it the field is omitted — that is the
-        /// test from KONTEXT-HARNESS.md 8.3.
+        /// `instructions` as text. Without it the field is omitted — the
+        /// backend does not require it (MESSUNGEN.md §1).
         #[arg(long, conflicts_with = "instructions_file")]
         instructions: Option<String>,
 
         /// `instructions` from a file. The official prompts now ship from the
-        /// backend itself (`models` -> `model_messages.instructions_template`);
-        /// the files under `../codex/codex-rs/core/` are leftovers.
+        /// backend itself (`models` -> `model_messages.instructions_template`).
         #[arg(long)]
         instructions_file: Option<String>,
 
@@ -103,13 +106,16 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Login => session::login().await,
-        Command::Logout => session::logout().await,
-        Command::Whoami => session::whoami().await,
+        Command::Login => auth::login().await,
+        Command::Logout => auth::logout().await,
+        Command::Whoami => auth::whoami().await,
+        Command::Serve { server_info } => serve::run(server_info).await,
         Command::Models { client_version } => {
-            let manager = session::auth_manager().await?;
-            session::current_auth(&manager).await?;
-            chatgpt::models(manager, &client_version).await
+            let manager = auth::auth_manager().await?;
+            auth::current_auth(&manager).await?;
+            let models = Client::new(manager).models(&client_version).await?;
+            println!("{}", serde_json::to_string_pretty(&models)?);
+            Ok(())
         }
         Command::Ask {
             prompt,
@@ -123,46 +129,167 @@ async fn main() -> Result<()> {
             dump_dir,
             session_id,
         } => {
-            let manager = session::auth_manager().await?;
+            let manager = auth::auth_manager().await?;
             // Fail early when there is no login — otherwise the error only
             // surfaces as a 401 out of the stream.
-            session::current_auth(&manager).await?;
+            auth::current_auth(&manager).await?;
 
             let instructions = match (instructions, instructions_file) {
                 (Some(text), _) => Some(text),
-                (None, Some(path)) => Some(chatgpt::load_instructions(&path)?),
+                (None, Some(path)) => Some(load_instructions(&path)?),
                 (None, None) => None,
             };
             let tools = match tools_file {
-                Some(path) => Some(chatgpt::load_tools(&path)?),
+                Some(path) => Some(load_tools(&path)?),
                 None => None,
             };
 
-            let opts = chatgpt::AskOptions {
-                prompt,
+            let request = StreamRequest {
                 model,
-                effort,
+                input: user_input(&prompt),
                 instructions,
                 tools,
-                store,
-                session_id: session_id.unwrap_or_else(new_session_id),
-                dump_dir,
+                effort,
+                tool_choice: None,
+                parallel_tool_calls: None,
+                store: Some(store),
+                session_id: Some(session_id.unwrap_or_else(new_session_id)),
             };
 
             if raw {
-                chatgpt::ask_raw(manager, opts).await
+                ask_raw(manager, request, dump_dir.as_deref()).await
             } else {
-                chatgpt::ask_decoded(manager, opts).await
+                ask_decoded(manager, request, dump_dir.as_deref()).await
             }
         }
     }
 }
 
+// --- Execution -------------------------------------------------------------
+
+async fn ask_decoded(
+    manager: Arc<codex_login::AuthManager>,
+    request: StreamRequest,
+    dump_dir: Option<&str>,
+) -> Result<()> {
+    if let Some(dir) = dump_dir {
+        dump(dir, "request.json", &to_pretty(&build_body(&request))?)?;
+    }
+
+    let mut stream = Client::new(manager).stream(request).await?;
+    let mut transcript = String::new();
+
+    while let Some(event) = stream.next().await {
+        transcript.push_str(&format!("{event:?}\n"));
+        print_event(&event);
+    }
+    println!();
+
+    if let Some(dir) = dump_dir {
+        dump(dir, "events.log", &transcript)?;
+    }
+    Ok(())
+}
+
+/// Deltas run on, everything else gets a marked line — so it stays visible what
+/// the backend sends besides text.
+fn print_event(event: &Event) {
+    match event {
+        Event::TextDelta { text } => print!("{text}"),
+        Event::ThinkingDelta { text } => eprint!("\x1b[2m{text}\x1b[0m"),
+        Event::Started { model } => eprintln!("[started] model={model:?}"),
+        Event::ToolCall {
+            call_id,
+            name,
+            arguments,
+        } => eprintln!("\n[tool-call] {name}({arguments}) call_id={call_id}"),
+        Event::RateLimits { plan, primary, .. } => {
+            eprintln!("[rate-limits] plan={plan:?} primary={primary:?}")
+        }
+        Event::Done {
+            stop_reason, usage, ..
+        } => eprintln!("\n[done] {stop_reason} usage={usage:?}"),
+        Event::Failed { message, retryable } => {
+            eprintln!("\n[failed] retryable={retryable} {message}")
+        }
+    }
+}
+
+async fn ask_raw(
+    manager: Arc<codex_login::AuthManager>,
+    request: StreamRequest,
+    dump_dir: Option<&str>,
+) -> Result<()> {
+    let body = build_body(&request);
+    if let Some(dir) = dump_dir {
+        dump(dir, "request.json", &to_pretty(&body)?)?;
+    }
+
+    // Shared rather than borrowed: the callback lives inside the future that
+    // yields the stream, and we read the buffer once more afterwards for the
+    // dump.
+    let meta = Arc::new(std::sync::Mutex::new(String::new()));
+    let sink = meta.clone();
+    let stream = raw_stream(manager, &request, body, move |line| {
+        eprintln!("{line}");
+        if let Ok(mut buffer) = sink.lock() {
+            buffer.push_str(line);
+            buffer.push('\n');
+        }
+    })
+    .await?;
+
+    let mut raw = String::new();
+    let mut stream = std::pin::pin!(stream);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|err| anyhow::anyhow!("stream error: {err}"))?;
+        let text = String::from_utf8_lossy(&chunk);
+        print!("{text}");
+        raw.push_str(&text);
+    }
+    println!();
+
+    if let Some(dir) = dump_dir {
+        let meta = meta.lock().map(|m| m.clone()).unwrap_or_default();
+        dump(dir, "meta.txt", &meta)?;
+        dump(dir, "response-raw.sse", &raw)?;
+    }
+    Ok(())
+}
+
+// --- Helpers ---------------------------------------------------------------
+
+fn to_pretty(value: &Value) -> Result<String> {
+    Ok(serde_json::to_string_pretty(value)?)
+}
+
+fn dump(dir: &str, name: &str, content: &str) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating dump directory: {dir}"))?;
+    let path = Path::new(dir).join(name);
+    std::fs::write(&path, content).with_context(|| format!("writing: {}", path.display()))?;
+    eprintln!("  -> {}", path.display());
+    Ok(())
+}
+
+/// Reads tool definitions from a JSON file.
+fn load_tools(path: &str) -> Result<Value> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading: {path}"))?;
+    let value: Value =
+        serde_json::from_str(&text).with_context(|| format!("parsing JSON: {path}"))?;
+    if !value.is_array() {
+        bail!("{path}: expected a JSON array of tool definitions");
+    }
+    Ok(value)
+}
+
+fn load_instructions(path: &str) -> Result<String> {
+    std::fs::read_to_string(path).with_context(|| format!("reading: {path}"))
+}
+
 /// A UUIDv4-shaped session id.
 ///
-/// No `uuid` crate, because the value is just a correlation handle here. Should
-/// it turn out that the backend checks the shape, this becomes a real
-/// dependency.
+/// No `uuid` crate, because the value is just a correlation handle. The backend
+/// derives its `prompt_cache_key` from it but does not check the shape.
 fn new_session_id() -> String {
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
