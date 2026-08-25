@@ -399,15 +399,6 @@ fn usage_chunk(id: &str, model: &str, usage: &crate::wire::Usage) -> String {
     .unwrap_or_default()
 }
 
-/// Maps a wire [`Event`] to zero or more Chat-Completions SSE lines.
-///
-/// Tool calls are emitted fragmented (index-based), because that is what the
-/// protocol specifies and what clients accumulate — wyai does exactly that.
-pub fn from_wire(event: &Event, id: &str, model: &str) -> Vec<String> {
-    let mut state = ChatResponseState::default();
-    state.apply(event, id, model, true)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,23 +552,5 @@ mod tests {
         assert!(lines[0].contains("\"error\""));
         assert!(!lines[0].contains("chat.completion.chunk"));
         assert!(state.failed.is_some());
-    }
-
-    #[test]
-    fn done_maps_to_finish_and_usage() {
-        let event = Event::Done {
-            response_id: Some("r".into()),
-            stop_reason: "end_turn".into(),
-            usage: Some(crate::wire::Usage {
-                input_tokens: Some(10),
-                output_tokens: Some(5),
-                total_tokens: Some(15),
-                ..Default::default()
-            }),
-        };
-        let chunks = from_wire(&event, "id", "m");
-        assert_eq!(chunks.last().unwrap(), "[DONE]");
-        assert!(chunks[0].contains("\"finish_reason\":\"stop\""));
-        assert!(chunks[1].contains("\"prompt_tokens\":10"));
     }
 }

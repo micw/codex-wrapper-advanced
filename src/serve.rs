@@ -355,12 +355,10 @@ async fn responses(
     Sse::new(sse).into_response()
 }
 
-/// `POST /v1/chat/completions` — OpenAI shape, streaming only.
+/// `POST /v1/chat/completions` — OpenAI shape, with streaming and non-streaming
+/// responses.
 ///
-/// Translation lives in [`crate::openai_chat`]. Non-streaming requests are
-/// answered with SSE as well: every Chat-Completions client handles a stream,
-/// while the reverse is not true, and a second accumulation path would double
-/// the mapping surface for no measured consumer.
+/// Translation and response accumulation live in [`crate::openai_chat`].
 async fn openai_chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
