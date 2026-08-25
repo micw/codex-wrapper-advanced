@@ -1,0 +1,42 @@
+[package]
+name = "codex-api-wrapper"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Pulls in the official Codex crates by path. The checkout sits as a sibling
+# directory under ../codex (openai/codex, Apache-2.0).
+#
+# Deliberately NOT pulled in: codex-core. Upstream keeps the login and responses
+# paths cleanly separate from it, which drops the entire agent machinery (tools,
+# sandbox, rollout, session store).
+[dependencies]
+codex-login = { path = "../codex/codex-rs/login" }
+codex-api = { path = "../codex/codex-rs/codex-api" }
+codex-http-client = { path = "../codex/codex-rs/http-client" }
+codex-config = { path = "../codex/codex-rs/config" }
+codex-protocol = { path = "../codex/codex-rs/protocol" }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+http = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+
+# Must be kept 1:1 in sync with ../codex/codex-rs/Cargo.toml.
+#
+# `[patch]` only applies within its own workspace and is NOT inherited across
+# path dependencies. `codex-api` requires a `proxy` feature that only OpenAI's
+# tokio-tungstenite fork has — without this block even resolution fails.
+#
+# MAINTENANCE: re-check on every upstream update. This is the first concrete cost
+# of linking the crates (KONTEXT-HARNESS.md 8.4, "the practical price of a fork").
+# (crossterm is patched upstream as well, but only affects the TUI and does not
+# appear in our dependency tree.)
+[patch.crates-io]
+tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
+
+[patch."ssh://git@github.com/openai-oss-forks/tungstenite-rs.git"]
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
