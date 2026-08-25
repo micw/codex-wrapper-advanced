@@ -19,6 +19,7 @@ use codex_api::ResponsesClient;
 use codex_api::RetryConfig;
 use codex_api::SharedAuthProvider;
 use codex_http_client::HttpTransport;
+use codex_http_client::Request;
 use codex_http_client::RequestBody;
 use codex_http_client::ReqwestTransport;
 use codex_login::AuthManager;
@@ -331,6 +332,40 @@ impl Client {
             .into_iter()
             .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
             .collect())
+    }
+
+    /// Reads the subscription usage and rate-limit snapshot.
+    pub async fn usage(&self) -> Result<Value, UpstreamError> {
+        let auth = self
+            .manager
+            .auth()
+            .await
+            .ok_or_else(|| UpstreamError::local("not signed in"))?;
+        let mut headers = HeaderMap::new();
+        apply_auth_headers(&auth, &mut headers);
+        let url = format!("{CHATGPT_BASE_URL}/wham/usage");
+        let request = Request::new(Method::GET, url).with_raw_body(Vec::<u8>::new());
+        let mut request = request;
+        request.headers = headers;
+        let response = transport()
+            .execute(request)
+            .await
+            .map_err(|err| UpstreamError::local(format!("usage request failed: {err}")))?;
+        let status = response.status;
+        let body = String::from_utf8_lossy(&response.body).to_string();
+        let value = serde_json::from_str(&body).map_err(|err| UpstreamError {
+            status: Some(status.as_u16()),
+            message: format!("invalid usage response: {err}"),
+            body: None,
+        })?;
+        if !status.is_success() {
+            return Err(UpstreamError {
+                status: Some(status.as_u16()),
+                message: body,
+                body: Some(value),
+            });
+        }
+        Ok(value)
     }
 }
 
