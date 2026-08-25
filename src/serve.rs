@@ -110,8 +110,10 @@ pub async fn run(config: ServeConfig) -> Result<()> {
         .route("/models", get(models))
         .route("/responses", post(responses));
 
-    // OpenAI-compatible. `/v1/chat/completions` and `/v1/responses` to follow.
-    let openai_api = Router::new().route("/models", get(openai_models));
+    // OpenAI-compatible. `/v1/responses` to follow.
+    let openai_api = Router::new()
+        .route("/models", get(openai_models))
+        .route("/chat/completions", post(openai_chat_completions));
 
     let app = Router::new()
         .route("/health", get(health))
@@ -342,6 +344,51 @@ async fn responses(
         let payload = serde_json::to_string(&event)
             .unwrap_or_else(|err| format!(r#"{{"type":"failed","message":"{err}"}}"#));
         Ok::<_, std::convert::Infallible>(SseEvent::default().data(payload))
+    });
+
+    Sse::new(sse).into_response()
+}
+
+/// `POST /v1/chat/completions` — OpenAI shape, streaming only.
+///
+/// Translation lives in [`crate::openai_chat`]. Non-streaming requests are
+/// answered with SSE as well: every Chat-Completions client handles a stream,
+/// while the reverse is not true, and a second accumulation path would double
+/// the mapping surface for no measured consumer.
+async fn openai_chat_completions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<crate::openai_chat::ChatRequest>,
+) -> axum::response::Response {
+    let Some(caller) = state.keys.authenticate(&headers) else {
+        return unauthorized();
+    };
+
+    let wire = match crate::openai_chat::to_wire(&request) {
+        Ok(wire) => wire,
+        Err(message) => return error(StatusCode::BAD_REQUEST, &message),
+    };
+
+    let stream = match state.client.stream(wire).await {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("[{caller}] chat request rejected: {err}");
+            return upstream_error(&err);
+        }
+    };
+
+    // Stable id for the whole turn; `created` stays 0 for the same reason as in
+    // `models_response` — a moving timestamp would make caches differ.
+    let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+    let model = request.model;
+
+    let sse = stream.flat_map(move |event| {
+        let lines = crate::openai_chat::from_wire(&event, &id, &model);
+        futures::stream::iter(
+            lines
+                .into_iter()
+                .map(|line| Ok::<_, std::convert::Infallible>(SseEvent::default().data(line))),
+        )
     });
 
     Sse::new(sse).into_response()

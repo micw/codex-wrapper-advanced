@@ -32,6 +32,7 @@ pub mod auth;
 pub mod client;
 pub mod listen;
 pub mod openai;
+pub mod openai_chat;
 pub mod serve;
 pub mod wire;
 
