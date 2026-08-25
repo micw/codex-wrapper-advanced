@@ -108,6 +108,7 @@ pub async fn run(config: ServeConfig) -> Result<()> {
 
     let wire_api = Router::new()
         .route("/auth", get(auth_status))
+        .route("/usage", get(usage))
         .route("/models", get(models))
         .route("/responses", post(responses));
 
@@ -283,6 +284,16 @@ async fn models(
     }
     match state.client.models(&query.client_version).await {
         Ok(models) => Json(json!({ "models": models })).into_response(),
+        Err(err) => upstream_error(&err),
+    }
+}
+
+async fn usage(State(state): State<AppState>, headers: HeaderMap) -> axum::response::Response {
+    if state.keys.authenticate(&headers).is_none() {
+        return unauthorized();
+    }
+    match state.client.usage().await {
+        Ok(usage) => Json(usage).into_response(),
         Err(err) => upstream_error(&err),
     }
 }
