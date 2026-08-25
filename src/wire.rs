@@ -187,12 +187,14 @@ pub struct ReadyStatus {
     pub access_token_expires_in_seconds: Option<i64>,
 }
 
-/// Written to stdout on startup so the parent process learns port and token.
+/// Written to stdout on startup so the parent process knows where to connect.
 /// Pattern borrowed from `codex-responses-api-proxy`.
+///
+/// Carries **no secret**: access depends on the unix socket's permissions or on
+/// configured API keys, not on anything stated here.
 #[derive(Debug, Clone, Serialize)]
 pub struct ServerInfo {
-    pub port: u16,
+    /// `unix:/path` or `http://127.0.0.1:8080`.
+    pub listen: String,
     pub pid: u32,
-    /// Bearer token, minted at startup. See [`crate::serve`] for the reasoning.
-    pub token: String,
 }

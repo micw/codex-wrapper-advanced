@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -59,17 +60,22 @@ class Daemon:
     """Starts `serve` and talks to it over a unix socket."""
 
     def __init__(self, binary: str) -> None:
+        # Unix socket: no keys needed, the file permissions suffice.
+        self.sock = f"/tmp/codex-measure-{os.getpid()}.sock"
         self.proc = subprocess.Popen(
-            [binary, "serve"], stdout=subprocess.PIPE, text=True
+            [binary, "serve", "--listen", f"unix:{self.sock}"],
+            stdout=subprocess.PIPE, text=True,
         )
-        line = self.proc.stdout.readline()
-        if not line:
+        if not self.proc.stdout.readline():
             raise SystemExit("daemon exited during startup — is there a login?")
-        info = json.loads(line)
-        self.base = f"http://127.0.0.1:{info['port']}"
-        self.headers = {"Authorization": f"Bearer {info['token']}"}
+        self.client = httpx.Client(
+            transport=httpx.HTTPTransport(uds=self.sock),
+            base_url="http://localhost",
+            timeout=httpx.Timeout(None, connect=10),
+        )
 
     def close(self) -> None:
+        self.client.close()
         self.proc.terminate()
         try:
             self.proc.wait(timeout=5)
@@ -80,13 +86,7 @@ class Daemon:
         """Run one turn. Returns status/text/calls/usage."""
         body.setdefault("model", MODEL)
         out = {"status": 0, "text": "", "calls": [], "usage": None, "error": None}
-        with httpx.stream(
-            "POST",
-            f"{self.base}/responses",
-            headers=self.headers,
-            json=body,
-            timeout=httpx.Timeout(None, connect=10),
-        ) as r:
+        with self.client.stream("POST", "/wire/v1/responses", json=body) as r:
             out["status"] = r.status_code
             if r.status_code != 200:
                 out["error"] = r.read().decode("utf-8", "replace")

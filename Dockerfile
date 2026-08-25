@@ -63,7 +63,7 @@ COPY --from=builder /usr/local/bin/codex-api-wrapper /usr/local/bin/codex-api-wr
 # root. The process runs as uid 10001 and could then neither create the socket
 # nor sign in. A freshly created named volume inherits owner and permissions from
 # the image, which is why this works.
-RUN mkdir -p /data && chown codex:codex /data
+RUN mkdir -p /data /run/codex && chown codex:codex /data /run/codex
 
 USER codex
 WORKDIR /home/codex
@@ -74,9 +74,13 @@ WORKDIR /home/codex
 ENV CODEX_WRAPPER_HOME=/data
 VOLUME ["/data"]
 
-# Loopback is the binary's default. Inside a container that means: reachable only
-# within this network namespace — exactly right for a Kubernetes sidecar. Anyone
-# needing the daemon from another namespace overrides it via CMD (--bind 0.0.0.0).
-# The default stays the narrow variant on purpose.
-EXPOSE 8080
-CMD ["codex-api-wrapper", "serve", "--port", "8080"]
+# Unix socket by default. For a sidecar that is the right choice: the file
+# permissions are the access control, no secret has to be distributed, and no port
+# stands open in the cluster. Share `/run/codex` as a volume and the neighbouring
+# container reaches the socket.
+#
+# For TCP (own server behind a reverse proxy):
+#   serve --listen 0.0.0.0:8080 --api-keys /data/keys.txt
+# Without --api-keys, TCP deliberately refuses to start.
+VOLUME ["/run/codex"]
+CMD ["codex-api-wrapper", "serve", "--listen", "unix:/run/codex/sock"]

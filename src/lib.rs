@@ -13,6 +13,8 @@
 //!   wire    — the vocabulary spoken outward, provider-neutral
 //!   client  — Codex types -> wire; knowledge of codex-api ends here
 //!   auth    — official OAuth flow, own CODEX_HOME
+//!   listen  — transport and access control
+//!   openai  — wire -> OpenAI format (pure translation)
 //!   serve   — REST API on top of client + auth
 //! ```
 //!
@@ -28,6 +30,8 @@
 
 pub mod auth;
 pub mod client;
+pub mod listen;
+pub mod openai;
 pub mod serve;
 pub mod wire;
 

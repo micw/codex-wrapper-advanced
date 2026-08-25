@@ -59,20 +59,33 @@ enum Command {
     },
     /// Start the local REST API. One process, arbitrarily many requests.
     Serve {
-        /// Also write to this file (mode 0600).
+        /// Where to listen: `unix:/run/codex/sock`, `127.0.0.1:8080`,
+        /// `0.0.0.0:8080` or a bare port number (loopback then).
+        ///
+        /// The unix socket is the default, because there the file permissions are
+        /// the access control and no secret has to be distributed.
+        #[arg(long, default_value = "unix:/tmp/codex-api-wrapper.sock")]
+        listen: codex_api_wrapper::listen::Listen,
+
+        /// File holding API keys, one line `name:secret`.
+        ///
+        /// **Required for TCP** — without it the daemon refuses to start. On a
+        /// unix socket it has no effect and is unnecessary.
+        #[arg(long)]
+        api_keys: Option<PathBuf>,
+
+        /// Also write the listen address to this file.
         #[arg(long)]
         server_info: Option<PathBuf>,
 
-        /// Bind address. Loopback by default. `0.0.0.0` makes the daemon
-        /// reachable from other network namespaces — needed in a container when it
-        /// is NOT a sidecar. See DEPLOY.md.
-        #[arg(long, default_value = "127.0.0.1")]
-        bind: std::net::IpAddr,
-
-        /// A fixed port instead of an ephemeral one. Useful in a container,
-        /// where a port gets mapped anyway.
-        #[arg(long, default_value_t = 0)]
-        port: u16,
+        /// Seconds between two sign-in hints in the log while the service
+        /// cannot work. `0` disables it.
+        ///
+        /// The hint contains a device code URL; whoever opens it and confirms the
+        /// code signs the service in. That removes the need for a login
+        /// endpoint.
+        #[arg(long, default_value_t = 300)]
+        login_reminder: u64,
     },
     /// Issue a single Responses request.
     Ask {
@@ -136,17 +149,22 @@ async fn main() -> Result<()> {
         Command::Logout => auth::logout().await,
         Command::Whoami => auth::whoami().await,
         Command::Serve {
+            listen,
+            api_keys,
             server_info,
-            bind,
-            port,
+            login_reminder,
         } => {
-            serve::run(
+            let keys = match &api_keys {
+                Some(path) => codex_api_wrapper::listen::ApiKeys::from_file(path)?,
+                None => codex_api_wrapper::listen::ApiKeys::default(),
+            };
+            serve::run(serve::ServeConfig {
+                listen,
+                keys,
                 server_info,
-                serve::BindConfig {
-                    address: bind,
-                    port,
-                },
-            )
+                login_reminder: (login_reminder > 0)
+                    .then(|| std::time::Duration::from_secs(login_reminder)),
+            })
             .await
         }
         Command::Models { client_version } => {

@@ -5,24 +5,35 @@
 //! dropping the connection. Over stdio both would have to be built by hand. And
 //! SSE is the format arriving from upstream anyway.
 //!
+//! # Paths
+//!
+//! The layout follows one rule: **one prefix, one exposure decision.** A reverse
+//! proxy should get by with a single rule per surface, and whatever does not sit
+//! under a released prefix stays inside automatically.
+//!
+//! | Prefix | Content | exposable |
+//! |---|---|---|
+//! | `/v1/*` | OpenAI-compatible (`models`; chat/responses to follow) | yes |
+//! | `/wire/v1/*` | our own vocabulary (`wire::Event`) | yes |
+//! | `/health`, `/ready` | operations, probes | **no** |
+//!
+//! `/v1` deliberately sits at the root rather than under `/api/openai/v1`: some
+//! clients take a host and append `/v1/chat/completions` themselves. `/wire/v1`
+//! is versioned from the start, because `wire::Event` is still moving.
+//!
+//! ```nginx
+//! location /v1/      { proxy_pass http://127.0.0.1:8080; }
+//! location /wire/v1/ { proxy_pass http://127.0.0.1:8080; }
+//! location /         { return 404; }   # /health, /ready stay inside
+//! ```
+//!
 //! # Access control
 //!
-//! A port, unlike a pipe, has no built-in access control. That bears directly on
-//! the account clause in KONTEXT-HARNESS.md §8.2: a local wrapper for oneself is
-//! not sharing, an open port for colleagues is — regardless of transport. Hence:
-//!
-//! * Bind to `127.0.0.1` only, never `0.0.0.0`.
-//! * An ephemeral port, so nothing waits on a well-known number.
-//! * A bearer token, minted randomly at startup and handed over only through
-//!   `server-info`. Without a valid token the answer is 401.
-//!
-//! The token does not protect against anyone who can read the process list or the
-//! `server-info` file — it stops an arbitrary other process on the machine from
-//! simply using the port.
+//! See [`crate::listen`]. In short: on a unix socket the file permissions are the
+//! access control, on TCP they are named API keys — and TCP without keys refuses
+//! to start.
 
-use std::net::IpAddr;
-use std::net::Ipv4Addr;
-use std::net::SocketAddr;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -41,12 +52,13 @@ use axum::routing::get;
 use axum::routing::post;
 use codex_login::AuthManager;
 use futures::StreamExt;
-use rand::Rng;
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::auth;
 use crate::client::Client;
+use crate::listen::ApiKeys;
+use crate::listen::Listen;
 use crate::wire::ServerInfo;
 use crate::wire::StreamRequest;
 
@@ -54,104 +66,131 @@ use crate::wire::StreamRequest;
 struct AppState {
     client: Client,
     manager: Arc<AuthManager>,
-    token: String,
+    keys: ApiKeys,
 }
 
-/// 256 bits from the OS CSPRNG, hex encoded.
-fn mint_token() -> String {
-    let bytes: [u8; 32] = rand::rng().random();
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+pub struct ServeConfig {
+    pub listen: Listen,
+    pub keys: ApiKeys,
+    pub server_info: Option<PathBuf>,
+    /// How often a sign-in URL is logged while the service cannot work.
+    /// `None` disables it.
+    pub login_reminder: Option<std::time::Duration>,
 }
 
-fn authorized(headers: &HeaderMap, expected: &str) -> bool {
-    let Some(value) = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-    else {
-        return false;
-    };
-    let Some(presented) = value.strip_prefix("Bearer ") else {
-        return false;
-    };
-    // Constant-time comparison is overkill here (local socket, 256-bit token)
-    // but costs nothing.
-    presented.len() == expected.len()
-        && presented
-            .bytes()
-            .zip(expected.bytes())
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            == 0
-}
+pub async fn run(config: ServeConfig) -> Result<()> {
+    let ServeConfig {
+        listen,
+        keys,
+        server_info,
+        login_reminder,
+    } = config;
 
-/// Where to bind.
-///
-/// Loopback by default. Inside a container that means "reachable only within this
-/// network namespace" — exactly right for a Kubernetes **sidecar**, because
-/// containers of one pod share localhost. Only when the daemon has to be reachable
-/// from another namespace is `--bind` needed; the token is then the sole remaining
-/// barrier. See DEPLOY.md.
-pub struct BindConfig {
-    pub address: IpAddr,
-    pub port: u16,
-}
+    // Before anything else: an unsafe combination must not even start listening.
+    crate::listen::validate(&listen, &keys)?;
 
-impl Default for BindConfig {
-    fn default() -> Self {
-        Self {
-            address: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            // 0 = the operating system picks a free port.
-            port: 0,
-        }
-    }
-}
-
-pub async fn run(server_info: Option<PathBuf>, bind: BindConfig) -> Result<()> {
     let manager = auth::auth_manager().await?;
-    let token = mint_token();
+
+    // Runs alongside the server: while not signed in, a sign-in URL goes to the
+    // log at regular intervals, and the login completes as soon as somebody
+    // confirms the code. Replaces a login endpoint along with its attack surface
+    // — see auth::login_reminder.
+    if let Some(interval) = login_reminder {
+        tokio::spawn(auth::login_reminder(manager.clone(), interval));
+    }
+
     let state = AppState {
         client: Client::new(manager.clone()),
         manager,
-        token: token.clone(),
+        keys,
     };
+
+    let wire_api = Router::new()
+        .route("/auth", get(auth_status))
+        .route("/models", get(models))
+        .route("/responses", post(responses));
+
+    // OpenAI-compatible. `/v1/chat/completions` and `/v1/responses` to follow.
+    let openai_api = Router::new().route("/models", get(openai_models));
 
     let app = Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
-        .route("/auth", get(auth_status))
-        .route("/models", get(models))
-        .route("/responses", post(responses))
+        .nest("/wire/v1", wire_api)
+        .nest("/v1", openai_api)
         .with_state(state);
 
-    if !bind.address.is_loopback() {
-        eprintln!(
-            "WARNING: listening on {} - the daemon is reachable outside this machine \
-             reachable. The bearer token is the only barrier. Anyone exposing the endpoint \
-             to other people shares their ChatGPT account \
-             with them.",
-            bind.address
-        );
+    match listen {
+        Listen::Unix(path) => serve_unix(app, &path, server_info.as_deref()).await,
+        Listen::Tcp(addr) => serve_tcp(app, addr, server_info.as_deref()).await,
     }
-    let listener = tokio::net::TcpListener::bind(SocketAddr::from((bind.address, bind.port)))
-        .await
-        .with_context(|| format!("binding to {}:{} failed", bind.address, bind.port))?;
-    let port = listener.local_addr()?.port();
+}
 
+async fn serve_tcp(
+    app: Router,
+    addr: std::net::SocketAddr,
+    server_info: Option<&Path>,
+) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("binding to {addr} failed"))?;
+    // Do not report `addr`: with port 0 the OS picks one.
+    let bound = listener.local_addr()?;
+
+    announce(&Listen::Tcp(bound), server_info)?;
+    axum::serve(listener, app).await.context("HTTP server")?;
+    Ok(())
+}
+
+async fn serve_unix(app: Router, path: &Path, server_info: Option<&Path>) -> Result<()> {
+    // A socket survives a hard abort as a file and then blocks the next start.
+    // Only remove it when there really is a socket there — otherwise a typo in
+    // the path deletes a real file.
+    if let Ok(meta) = std::fs::metadata(path) {
+        use std::os::unix::fs::FileTypeExt;
+        if meta.file_type().is_socket() {
+            std::fs::remove_file(path)
+                .with_context(|| format!("removing stale socket: {}", path.display()))?;
+        } else {
+            anyhow::bail!(
+                "{} exists and is not a socket — check the path",
+                path.display()
+            );
+        }
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating socket directory: {}", parent.display()))?;
+    }
+
+    let listener = tokio::net::UnixListener::bind(path)
+        .with_context(|| format!("binding to {} failed", path.display()))?;
+
+    // The permissions are the access control here — so set them tightly, and do
+    // it after binding (the file does not exist before).
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("setting permissions on {}", path.display()))?;
+
+    announce(&Listen::Unix(path.to_path_buf()), server_info)?;
+    axum::serve(listener, app).await.context("HTTP server")?;
+    Ok(())
+}
+
+/// Tells the parent process where we listen.
+///
+/// Carries **no secret** — access now depends on the socket's file permissions or
+/// on configured keys. The file stays useful when TCP is run with port 0.
+fn announce(listen: &Listen, server_info: Option<&Path>) -> Result<()> {
     let info = ServerInfo {
-        port,
+        listen: listen.to_string(),
         pid: std::process::id(),
-        token,
     };
     let encoded = serde_json::to_string(&info)?;
 
-    if let Some(path) = &server_info {
+    if let Some(path) = server_info {
         std::fs::write(path, &encoded)
             .with_context(|| format!("writing server-info: {}", path.display()))?;
-        // Owner-only: the file carries the token.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-        }
     }
 
     // Always to stdout as well, so a parent process can do without the file.
@@ -160,8 +199,7 @@ pub async fn run(server_info: Option<PathBuf>, bind: BindConfig) -> Result<()> {
     use std::io::Write as _;
     std::io::stdout().flush()?;
 
-    eprintln!("codex-api-wrapper serve: http://{}:{port}", bind.address);
-    axum::serve(listener, app).await.context("HTTP server")?;
+    eprintln!("codex-api-wrapper serve: {listen}");
     Ok(())
 }
 
@@ -169,13 +207,13 @@ pub async fn run(server_info: Option<PathBuf>, bind: BindConfig) -> Result<()> {
 
 /// Readiness — can the daemon work?
 ///
-/// `200` if yes, `503` if no. No token required, because a Kubernetes probe
-/// cannot send one; the body therefore carries operational state only, no
-/// identity.
+/// `200` if yes, `503` if no. No key required, because a Kubernetes probe cannot
+/// send one; the body therefore carries operational state only, no identity. Do
+/// not expose.
 ///
-/// This probe catches the case `/health` cannot see: `auth()` swallows refresh
-/// errors and keeps reporting a valid sign-in while the refresh has long since
-/// failed for good (DEPLOY.md §1).
+/// Catches the case `/health` cannot see: `auth()` swallows refresh errors and
+/// keeps reporting a valid sign-in while the refresh has long since failed for
+/// good (DEPLOY.md §1).
 async fn ready(State(state): State<AppState>) -> axum::response::Response {
     let status = auth::readiness(&state.manager).await;
     let code = if status.ready {
@@ -186,7 +224,7 @@ async fn ready(State(state): State<AppState>) -> axum::response::Response {
     (code, Json(status)).into_response()
 }
 
-/// Lebenszeichen, ohne Token.
+/// Liveness. Do not expose.
 ///
 /// **Always** answers `200` while the process is alive — that is the point. Tie
 /// liveness to the sign-in state and Kubernetes will kill the container in a
@@ -208,7 +246,7 @@ async fn auth_status(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    if !authorized(&headers, &state.token) {
+    if state.keys.authenticate(&headers).is_none() {
         return unauthorized();
     }
     match auth::status(&state.manager).await {
@@ -232,11 +270,43 @@ async fn models(
     headers: HeaderMap,
     Query(query): Query<ModelsQuery>,
 ) -> axum::response::Response {
-    if !authorized(&headers, &state.token) {
+    if state.keys.authenticate(&headers).is_none() {
         return unauthorized();
     }
     match state.client.models(&query.client_version).await {
         Ok(models) => Json(json!({ "models": models })).into_response(),
+        Err(err) => upstream_error(&err),
+    }
+}
+
+#[derive(Deserialize)]
+struct OpenAiModelsQuery {
+    /// Also list models with `visibility: hide` — on the subscription that is
+    /// `codex-auto-review`. Off by default so a model picker does not get
+    /// cluttered with internals.
+    #[serde(default)]
+    include_hidden: bool,
+}
+
+/// `GET /v1/models` — OpenAI shape.
+///
+/// A slim projection rather than a pass-through; the reasoning is in
+/// [`crate::openai::models_response`]. Callers who need the backend's raw data
+/// use `/wire/v1/models`.
+async fn openai_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<OpenAiModelsQuery>,
+) -> axum::response::Response {
+    if state.keys.authenticate(&headers).is_none() {
+        return unauthorized();
+    }
+    match state.client.models(crate::DEFAULT_CLIENT_VERSION).await {
+        Ok(models) => Json(crate::openai::models_response(
+            &models,
+            query.include_hidden,
+        ))
+        .into_response(),
         Err(err) => upstream_error(&err),
     }
 }
@@ -253,16 +323,19 @@ async fn responses(
     headers: HeaderMap,
     Json(request): Json<StreamRequest>,
 ) -> axum::response::Response {
-    if !authorized(&headers, &state.token) {
+    let Some(caller) = state.keys.authenticate(&headers) else {
         return unauthorized();
-    }
+    };
 
     let stream = match state.client.stream(request).await {
         Ok(stream) => stream,
         // Errors *before* the first event come back as an HTTP status, not as an
         // SSE event: a status-200 stream containing nothing but an error event
         // would be harder for the caller to handle than a 400.
-        Err(err) => return upstream_error(&err),
+        Err(err) => {
+            eprintln!("[{caller}] request rejected: {err}");
+            return upstream_error(&err);
+        }
     };
 
     let sse = stream.map(|event| {

@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use anyhow::Result;
@@ -18,6 +19,7 @@ use codex_login::AuthRouteConfig;
 use codex_login::CLIENT_ID;
 use codex_login::CodexAuth;
 use codex_login::ServerOptions;
+use codex_login::complete_device_code_login;
 use codex_login::load_auth_dot_json;
 use codex_login::logout_with_revoke;
 use codex_login::request_device_code;
@@ -57,6 +59,17 @@ fn keyring_kind() -> AuthKeyringBackendKind {
     AuthKeyringBackendKind::default()
 }
 
+fn server_options(codex_home: PathBuf) -> ServerOptions {
+    ServerOptions::new(
+        codex_home,
+        CLIENT_ID.to_string(),
+        /*forced_chatgpt_workspace_id*/ None,
+        STORE_MODE,
+        keyring_kind(),
+        route_config(),
+    )
+}
+
 /// Runs the official ChatGPT OAuth flow (PKCE, local callback server).
 ///
 /// `run_login_server` binds a fixed port because the `redirect_uri` is
@@ -75,14 +88,7 @@ pub async fn login() -> Result<()> {
         eprintln!("Note: existing credentials were not cleanly removed: {err}");
     }
 
-    let mut opts = ServerOptions::new(
-        codex_home.clone(),
-        CLIENT_ID.to_string(),
-        /*forced_chatgpt_workspace_id*/ None,
-        STORE_MODE,
-        keyring_kind(),
-        route_config(),
-    );
+    let mut opts = server_options(codex_home.clone());
     // On a headless or remote host there is no browser worth opening. The URL is
     // printed instead.
     opts.open_browser = std::env::var("CODEX_WRAPPER_NO_BROWSER").is_err();
@@ -97,10 +103,7 @@ pub async fn login() -> Result<()> {
     eprintln!("Waiting for the callback ...");
 
     server.block_until_done().await?;
-    eprintln!(
-        "Login complete. Credentials in {}",
-        codex_home.display()
-    );
+    eprintln!("Login complete. Credentials in {}", codex_home.display());
     Ok(())
 }
 
@@ -111,21 +114,13 @@ pub async fn login() -> Result<()> {
 /// URL on any device and types in a code.
 ///
 /// `probe_only` requests a code and stops there. That makes it possible to check
-/// whether the flow is enabled for this account at all without forcing a
-/// sign-in.
+/// whether the flow is enabled for this account at all without forcing a sign-in.
 pub async fn login_device(probe_only: bool) -> Result<()> {
     let codex_home = home()?;
     std::fs::create_dir_all(&codex_home)
         .with_context(|| format!("creating CODEX_HOME: {}", codex_home.display()))?;
 
-    let opts = ServerOptions::new(
-        codex_home.clone(),
-        CLIENT_ID.to_string(),
-        None,
-        STORE_MODE,
-        keyring_kind(),
-        route_config(),
-    );
+    let opts = server_options(codex_home.clone());
 
     if probe_only {
         let code = request_device_code(&opts).await?;
@@ -137,11 +132,97 @@ pub async fn login_device(probe_only: bool) -> Result<()> {
     }
 
     run_device_code_login(opts).await?;
-    eprintln!(
-        "Login complete. Credentials in {}",
-        codex_home.display()
-    );
+    eprintln!("Login complete. Credentials in {}", codex_home.display());
     Ok(())
+}
+
+/// Logs a sign-in URL at regular intervals while the service cannot work — and
+/// completes the sign-in as soon as somebody enters the code.
+///
+/// This replaces a login endpoint: no extra path, no new attack surface, no
+/// question of roles. Whoever may read the logs can sign in; whoever may not
+/// never sees the URL. It covers both cases that matter — first start without
+/// credentials, and losing the sign-in months later.
+///
+/// The code is bound to the account that *confirms* it, not to the service. A
+/// logged URL therefore lets nobody get at existing credentials; at most it lets
+/// them bind the service to a different account. Logs containing it still do not
+/// belong in other people's hands.
+pub async fn login_reminder(manager: Arc<AuthManager>, interval: Duration) {
+    // Do not retry immediately after a failure: without network that would flood
+    // the log.
+    const BACKOFF: Duration = Duration::from_secs(60);
+
+    loop {
+        if readiness(&manager).await.ready {
+            tokio::time::sleep(interval).await;
+            continue;
+        }
+
+        let Ok(codex_home) = home() else {
+            tokio::time::sleep(BACKOFF).await;
+            continue;
+        };
+        let status = readiness(&manager).await;
+        let opts = server_options(codex_home);
+
+        let code = match request_device_code(&opts).await {
+            Ok(code) => code,
+            Err(err) => {
+                eprintln!(
+                    "Sign-in required ({}), but no device code could be obtained: {err}",
+                    status.reason
+                );
+                tokio::time::sleep(BACKOFF).await;
+                continue;
+            }
+        };
+
+        // Keep these before waiting: `complete_device_code_login` consumes the code.
+        let url = code.verification_url.clone();
+        let user_code = code.user_code.clone();
+        announce_login(&status, &url, &user_code);
+
+        // The poll runs for up to 15 minutes; the reminder runs alongside it so
+        // that a later glance at the log finds a code that is still valid.
+        tokio::select! {
+            result = complete_device_code_login(opts, code) => match result {
+                Ok(()) => {
+                    manager.reload().await;
+                    eprintln!("Sign-in successful, the service is ready.");
+                }
+                Err(err) => {
+                    eprintln!("Sign-in did not complete: {err}");
+                    tokio::time::sleep(BACKOFF).await;
+                }
+            },
+            // Never finishes — the select! always ends through the poll arm.
+            () = remind(&status, &url, &user_code, interval) => {}
+        }
+    }
+}
+
+fn announce_login(status: &crate::wire::ReadyStatus, url: &str, user_code: &str) {
+    let why = match status.reason {
+        "not_authenticated" => "not signed in".to_string(),
+        "token_expired" => "access token expired".to_string(),
+        "refresh_failed" => format!(
+            "refresh failed permanently: {}",
+            status.detail.as_deref().unwrap_or("no reason reported")
+        ),
+        other => other.to_string(),
+    };
+    eprintln!("=== SIGN-IN REQUIRED ({why}) ===");
+    eprintln!("  1. Open: {url}");
+    eprintln!("  2. Code: {user_code}");
+    eprintln!("  (the code is valid for about 15 minutes; a new one appears here after that)");
+}
+
+async fn remind(status: &crate::wire::ReadyStatus, url: &str, user_code: &str, interval: Duration) {
+    loop {
+        tokio::time::sleep(interval).await;
+        announce_login(status, url, user_code);
+    }
 }
 
 pub async fn logout() -> Result<()> {
@@ -227,6 +308,11 @@ pub async fn readiness(manager: &AuthManager) -> crate::wire::ReadyStatus {
     }
 }
 
+/// Auth state as a data structure, for `GET /wire/v1/auth`.
+///
+/// Deliberately contains **no** token. The daemon never hands out credentials;
+/// whoever reaches the endpoint should learn *whether* and *as whom* we are
+/// signed in, not with what.
 pub async fn status(manager: &AuthManager) -> Result<crate::wire::AuthStatus> {
     let Some(auth) = manager.auth().await else {
         return Ok(crate::wire::AuthStatus {
