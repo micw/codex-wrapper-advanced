@@ -184,6 +184,7 @@ pub struct UpstreamError {
     /// errors that never reached the backend.
     pub status: Option<u16>,
     pub message: String,
+    pub body: Option<Value>,
 }
 
 impl std::fmt::Display for UpstreamError {
@@ -202,8 +203,13 @@ impl UpstreamError {
         Self {
             status: None,
             message: message.into(),
+            body: None,
         }
     }
+}
+
+fn parse_error_body(body: Option<&str>) -> Option<Value> {
+    body.and_then(|body| serde_json::from_str(body).ok())
 }
 
 impl From<codex_api::ApiError> for UpstreamError {
@@ -216,29 +222,45 @@ impl From<codex_api::ApiError> for UpstreamError {
             // verbatim, drop the headers (they are in the daemon log).
             E::Transport(T::Http {
                 status, body, url, ..
-            }) => Self {
-                status: Some(status.as_u16()),
-                message: body.unwrap_or_else(|| format!("no response from {url:?}")),
-            },
+            }) => {
+                let message = body
+                    .as_deref()
+                    .unwrap_or("no response from upstream")
+                    .to_string();
+                Self {
+                    status: Some(status.as_u16()),
+                    body: parse_error_body(body.as_deref()),
+                    message: if body.is_some() {
+                        message
+                    } else {
+                        format!("{message}: {url:?}")
+                    },
+                }
+            }
             E::Api { status, message } => Self {
                 status: Some(status.as_u16()),
                 message,
+                body: None,
             },
             E::InvalidRequest { message } => Self {
                 status: Some(400),
                 message,
+                body: None,
             },
             E::QuotaExceeded => Self {
                 status: Some(429),
                 message: "quota exhausted".to_string(),
+                body: None,
             },
             E::RateLimit(message) => Self {
                 status: Some(429),
                 message,
+                body: None,
             },
             E::ServerOverloaded => Self {
                 status: Some(503),
                 message: "server overloaded".to_string(),
+                body: None,
             },
             other => Self::local(other.to_string()),
         }

@@ -459,6 +459,20 @@ fn upstream_chat_error(message: &str, retryable: bool) -> axum::response::Respon
         .into_response()
 }
 
+fn client_error(err: &crate::client::UpstreamError) -> serde_json::Value {
+    if let Some(body) = &err.body
+        && let Some(error) = body.get("error")
+    {
+        return error.clone();
+    }
+    json!({
+        "message": err.message,
+        "type": "api_error",
+        "param": null,
+        "code": "upstream_error",
+    })
+}
+
 /// Passes the upstream's status through.
 ///
 /// A 400 from the backend stays a 400, with its own wording. Only where there was
@@ -472,13 +486,8 @@ fn upstream_error(err: &crate::client::UpstreamError) -> axum::response::Respons
     (
         status,
         Json(json!({
-            "error": {
-                "message": err.message,
-                "type": "api_error",
-                "param": null,
-                "code": "upstream_error",
-                "upstream_status": err.status,
-            }
+            "error": client_error(err),
+            "upstream_status": err.status,
         })),
     )
         .into_response()
