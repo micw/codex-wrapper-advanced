@@ -24,6 +24,7 @@ use codex_http_client::ReqwestTransport;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::default_client;
+use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use futures::Stream;
 use futures::StreamExt;
@@ -165,6 +166,82 @@ pub fn build_body(req: &StreamRequest) -> Value {
     body
 }
 
+// --- Errors ----------------------------------------------------------------
+
+/// Failure while starting a turn, carrying the upstream's state.
+///
+/// Exists so a 400 from the backend reaches the caller as a 400 — wording
+/// included. `format!("{err:?}")` on `ApiError` would be fatal here: it produces
+/// a debug dump including every response header and buries the actual message in
+/// it. Exactly the "silently swallowed" class that KONTEXT-HARNESS.md §7
+/// criticises in the Claude wrapper.
+#[derive(Debug)]
+pub struct UpstreamError {
+    /// The upstream's status, if there was one. `None` for transport or auth
+    /// errors that never reached the backend.
+    pub status: Option<u16>,
+    pub message: String,
+}
+
+impl std::fmt::Display for UpstreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.status {
+            Some(status) => write!(f, "HTTP {status}: {}", self.message),
+            None => write!(f, "{}", self.message),
+        }
+    }
+}
+
+impl std::error::Error for UpstreamError {}
+
+impl UpstreamError {
+    fn local(message: impl Into<String>) -> Self {
+        Self {
+            status: None,
+            message: message.into(),
+        }
+    }
+}
+
+impl From<codex_api::ApiError> for UpstreamError {
+    fn from(err: codex_api::ApiError) -> Self {
+        use codex_api::ApiError as E;
+        use codex_http_client::TransportError as T;
+
+        match err {
+            // The interesting case: the backend answered. Pass the body through
+            // verbatim, drop the headers (they are in the daemon log).
+            E::Transport(T::Http {
+                status, body, url, ..
+            }) => Self {
+                status: Some(status.as_u16()),
+                message: body.unwrap_or_else(|| format!("no response from {url:?}")),
+            },
+            E::Api { status, message } => Self {
+                status: Some(status.as_u16()),
+                message,
+            },
+            E::InvalidRequest { message } => Self {
+                status: Some(400),
+                message,
+            },
+            E::QuotaExceeded => Self {
+                status: Some(429),
+                message: "quota exhausted".to_string(),
+            },
+            E::RateLimit(message) => Self {
+                status: Some(429),
+                message,
+            },
+            E::ServerOverloaded => Self {
+                status: Some(503),
+                message: "server overloaded".to_string(),
+            },
+            other => Self::local(other.to_string()),
+        }
+    }
+}
+
 // --- Client ----------------------------------------------------------------
 
 /// Stateless per call, but shares the `AuthManager` and HTTP client.
@@ -185,7 +262,10 @@ impl Client {
     ///
     /// Dropping the stream aborts the request — that is the cancellation HTTP
     /// brings along for free.
-    pub async fn stream(&self, req: StreamRequest) -> Result<impl Stream<Item = Event> + use<>> {
+    pub async fn stream(
+        &self,
+        req: StreamRequest,
+    ) -> Result<impl Stream<Item = Event> + use<>, UpstreamError> {
         let body = build_body(&req);
         let auth: SharedAuthProvider = Arc::new(ManagedChatGptAuth {
             manager: self.manager.clone(),
@@ -202,14 +282,13 @@ impl Client {
 
         let upstream = client
             .stream(body, headers, Compression::None, /*turn_state*/ None)
-            .await
-            .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+            .await?;
 
         Ok(map_events(upstream))
     }
 
     /// The subscription's model list.
-    pub async fn models(&self, client_version: &str) -> Result<Vec<Value>> {
+    pub async fn models(&self, client_version: &str) -> Result<Vec<Value>, UpstreamError> {
         let provider = provider();
         let auth: SharedAuthProvider = Arc::new(ManagedChatGptAuth {
             manager: self.manager.clone(),
@@ -218,10 +297,7 @@ impl Client {
         let url =
             codex_api::ModelsClient::<ReqwestTransport>::request_url(&provider, client_version);
 
-        let (models, _etag) = client
-            .list_models(url, HeaderMap::new())
-            .await
-            .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+        let (models, _etag) = client.list_models(url, HeaderMap::new()).await?;
 
         // Via serde_json so the daemon passes the upstream structure through
         // unchanged. What the backend declares should not be filtered here — the
@@ -282,17 +358,40 @@ fn map_one(event: ResponseEvent, slot: &ServerModelSlot) -> Vec<Event> {
         | ResponseEvent::ReasoningContentDelta { delta, .. } => {
             vec![Event::ThinkingDelta { text: delta }]
         }
-        ResponseEvent::OutputItemDone(item) => match item {
+        ResponseEvent::OutputItemDone(ref item) => match item {
             ResponseItem::FunctionCall {
                 call_id,
                 name,
                 arguments,
                 ..
             } => vec![Event::ToolCall {
-                call_id,
-                name,
-                arguments,
+                call_id: call_id.clone(),
+                name: name.clone(),
+                arguments: arguments.clone(),
             }],
+            // Pass on as opaque JSON, do not rebuild from fields: the
+            // `encrypted_content` is verified server-side.
+            ResponseItem::Reasoning { summary, .. } => {
+                let texts = summary
+                    .iter()
+                    .map(|entry| match entry {
+                        ReasoningItemReasoningSummary::SummaryText { text } => text.clone(),
+                    })
+                    .collect();
+                match serde_json::to_value(item) {
+                    Ok(value) => vec![Event::Reasoning {
+                        item: value,
+                        summary: texts,
+                    }],
+                    // If the item could not be serialised, a silent loss would
+                    // be worse than a message: the consumer would otherwise be
+                    // unable to continue the turn correctly.
+                    Err(err) => vec![Event::Failed {
+                        message: format!("reasoning item not serialisable: {err}"),
+                        retryable: false,
+                    }],
+                }
+            }
             // Message items only repeat what already arrived as deltas.
             _ => vec![],
         },

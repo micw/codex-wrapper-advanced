@@ -66,6 +66,23 @@ pub enum Event {
         name: String,
         arguments: String,
     },
+    /// A completed reasoning item — the replay payload for follow-up turns.
+    ///
+    /// Measured (MESSUNGEN.md §9): the backend **verifies** `encrypted_content`
+    /// cryptographically. A single altered byte yields
+    /// `400 … could not be verified`. That is why `item` is passed through as
+    /// opaque JSON instead of being rebuilt from individual fields — whoever
+    /// replays it echoes it unchanged.
+    ///
+    /// Leaving it out is allowed and free: a turn without a reasoning item is
+    /// accepted, and one without `encrypted_content` demonstrably contributes
+    /// nothing (identical token count).
+    Reasoning {
+        /// To be returned to `input` unchanged. Do not write into it.
+        item: serde_json::Value,
+        /// Plain-text summary, already extracted for display.
+        summary: Vec<String>,
+    },
     /// Subscription quota. Arrives once per turn, before the first text.
     RateLimits {
         plan: Option<String>,

@@ -203,6 +203,14 @@ fn print_event(event: &Event) {
             name,
             arguments,
         } => eprintln!("\n[tool-call] {name}({arguments}) call_id={call_id}"),
+        Event::Reasoning { summary, item } => {
+            let bytes = item
+                .get("encrypted_content")
+                .and_then(|v| v.as_str())
+                .map(str::len)
+                .unwrap_or(0);
+            eprintln!("\n[reasoning] {summary:?} (encrypted_content: {bytes} characters)")
+        }
         Event::RateLimits { plan, primary, .. } => {
             eprintln!("[rate-limits] plan={plan:?} primary={primary:?}")
         }

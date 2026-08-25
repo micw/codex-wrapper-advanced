@@ -169,7 +169,7 @@ async fn models(
     }
     match state.client.models(&query.client_version).await {
         Ok(models) => Json(json!({ "models": models })).into_response(),
-        Err(err) => error(StatusCode::BAD_GATEWAY, &err.to_string()),
+        Err(err) => upstream_error(&err),
     }
 }
 
@@ -192,8 +192,9 @@ async fn responses(
     let stream = match state.client.stream(request).await {
         Ok(stream) => stream,
         // Errors *before* the first event come back as an HTTP status, not as an
-        // SSE event. A 400 from the backend should be a 400 here too.
-        Err(err) => return error(StatusCode::BAD_GATEWAY, &err.to_string()),
+        // SSE event: a status-200 stream containing nothing but an error event
+        // would be harder for the caller to handle than a 400.
+        Err(err) => return upstream_error(&err),
     };
 
     let sse = stream.map(|event| {
@@ -203,6 +204,23 @@ async fn responses(
     });
 
     Sse::new(sse).into_response()
+}
+
+/// Passes the upstream's status through.
+///
+/// A 400 from the backend stays a 400, with its own wording. Only where there was
+/// no answer at all (transport, auth) does it become a 502 — then the daemon
+/// really is the broken link.
+fn upstream_error(err: &crate::client::UpstreamError) -> axum::response::Response {
+    let status = err
+        .status
+        .and_then(|code| StatusCode::from_u16(code).ok())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+    (
+        status,
+        Json(json!({ "error": err.message, "upstream_status": err.status })),
+    )
+        .into_response()
 }
 
 fn unauthorized() -> axum::response::Response {
