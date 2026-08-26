@@ -57,6 +57,14 @@ pub enum Event {
     ThinkingDelta {
         text: String,
     },
+    /// Boundary between two thinking blocks.
+    ///
+    /// The backend delivers the summary in several parts, each a titled
+    /// paragraph (MESSUNGEN.md §3). Without the boundary they run together into
+    /// one line — `**First title**…**Second title**`. Carries no text: a
+    /// consumer with no notion of blocks ignores the event and loses nothing but
+    /// the paragraph break.
+    ThinkingBreak,
     /// A tool call for **the client** to execute. `arguments` is a string
     /// containing JSON, not a parsed object — that is how the Responses API
     /// delivers it, and re-parsing would lose information when the JSON is

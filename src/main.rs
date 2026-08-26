@@ -254,6 +254,7 @@ fn print_event(event: &Event) {
     match event {
         Event::TextDelta { text } => print!("{text}"),
         Event::ThinkingDelta { text } => eprint!("\x1b[2m{text}\x1b[0m"),
+        Event::ThinkingBreak => eprintln!(),
         Event::Started { model } => eprintln!("[started] model={model:?}"),
         Event::ToolCall {
             call_id,

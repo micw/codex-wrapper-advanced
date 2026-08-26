@@ -300,6 +300,17 @@ impl ChatResponseState {
                     json!([{ "index": 0, "delta": { "reasoning_content": text }, "finish_reason": null }]),
                 )]
             }
+            // A block boundary becomes a paragraph break: `reasoning_content` is
+            // one flat string and has no notion of parts. Before the first text
+            // there is nothing to separate.
+            Event::ThinkingBreak if !self.reasoning.is_empty() => {
+                self.reasoning.push_str("\n\n");
+                vec![chunk(
+                    id,
+                    self.output_model(fallback_model),
+                    json!([{ "index": 0, "delta": { "reasoning_content": "\n\n" }, "finish_reason": null }]),
+                )]
+            }
             Event::ToolCall {
                 call_id,
                 name,
@@ -349,7 +360,7 @@ impl ChatResponseState {
                     "error": { "message": message, "type": "api_error", "code": "upstream_error" }
                 })).unwrap_or_default(), "[DONE]".to_string()]
             }
-            Event::RateLimits { .. } | Event::Reasoning { .. } => Vec::new(),
+            Event::RateLimits { .. } | Event::Reasoning { .. } | Event::ThinkingBreak => Vec::new(),
         }
     }
 

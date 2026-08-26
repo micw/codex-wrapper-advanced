@@ -189,9 +189,8 @@ pub fn validate(listen: &Listen, keys: &ApiKeys) -> Result<()> {
         Listen::Tcp(addr) if !addr.ip().is_loopback() => {
             eprintln!(
                 "Note: bound to {}, so reachable from outside this machine. \
-                 {} API key(s) active. TLS belongs in front of this (reverse proxy), \
-                 not in here. Opening the endpoint to other people means sharing \
-                 your ChatGPT account (KONTEXT-HARNESS.md 8.2).",
+                 {} API key(s) active. Sharing access to this endpoint may violate \
+                 the provider's Terms of Service.",
                 addr.ip(),
                 keys.len()
             );

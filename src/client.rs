@@ -428,6 +428,12 @@ fn map_one(event: ResponseEvent, slot: &ServerModelSlot) -> Vec<Event> {
         | ResponseEvent::ReasoningContentDelta { delta, .. } => {
             vec![Event::ThinkingDelta { text: delta }]
         }
+        // Only from the second part onward. The backend announces part 0 as
+        // well, and a boundary before the first block would open the thinking
+        // with an empty paragraph.
+        ResponseEvent::ReasoningSummaryPartAdded { summary_index } if summary_index > 0 => {
+            vec![Event::ThinkingBreak]
+        }
         ResponseEvent::OutputItemDone(ref item) => match item {
             ResponseItem::FunctionCall {
                 call_id,

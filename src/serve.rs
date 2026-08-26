@@ -13,7 +13,7 @@
 //!
 //! | Prefix | Content | exposable |
 //! |---|---|---|
-//! | `/v1/*` | OpenAI-compatible (`models`; chat/responses to follow) | yes |
+//! | `/v1/*` | OpenAI-compatible (`models`, `chat/completions`, `responses`) | yes |
 //! | `/wire/v1/*` | our own vocabulary (`wire::Event`) | yes |
 //! | `/health`, `/ready` | operations, probes | **no** |
 //!
@@ -112,10 +112,11 @@ pub async fn run(config: ServeConfig) -> Result<()> {
         .route("/models", get(models))
         .route("/responses", post(responses));
 
-    // OpenAI-compatible. `/v1/responses` to follow.
+    // OpenAI-compatible.
     let openai_api = Router::new()
         .route("/models", get(openai_models))
-        .route("/chat/completions", post(openai_chat_completions));
+        .route("/chat/completions", post(openai_chat_completions))
+        .route("/responses", post(openai_responses));
 
     let app = Router::new()
         .route("/health", get(health))
@@ -444,6 +445,86 @@ async fn openai_chat_completions(
                 .into_iter()
                 .map(|line| Ok::<_, std::convert::Infallible>(SseEvent::default().data(line))),
         )
+    });
+
+    Sse::new(sse).into_response()
+}
+
+/// `POST /v1/responses` — the OpenAI Responses API, streaming and
+/// non-streaming.
+///
+/// Translation and accumulation live in [`crate::openai_responses`]; why the
+/// endpoint exists next to Chat Completions is documented there.
+///
+/// Unlike Chat Completions the stream carries `event:` names as well: that is
+/// what OpenAI sends, and clients keying off it would otherwise see nothing. The
+/// same information is in `data.type`, so a consumer reading only the payload
+/// loses nothing. There is no `[DONE]` sentinel — `response.completed` is the
+/// terminal event.
+async fn openai_responses(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: Result<Json<crate::openai_responses::ResponsesRequest>, JsonRejection>,
+) -> axum::response::Response {
+    let Some(caller) = state.keys.authenticate(&headers) else {
+        return unauthorized();
+    };
+    let request = match request {
+        Ok(Json(request)) => request,
+        Err(rejection) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                &rejection.body_text(),
+                "invalid_request_error",
+                None,
+            );
+        }
+    };
+
+    let streaming = request.stream.unwrap_or(false);
+
+    let wire = match crate::openai_responses::to_wire(&request) {
+        Ok(wire) => wire,
+        Err(message) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                &message,
+                "invalid_request_error",
+                None,
+            );
+        }
+    };
+
+    let stream = match state.client.stream(wire).await {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("[{caller}] responses request rejected: {err}");
+            return upstream_error(&err);
+        }
+    };
+
+    let id = format!("resp_{}", uuid::Uuid::new_v4().simple());
+    let mut accumulator = crate::openai_responses::ResponsesState::new(id, &request);
+
+    if !streaming {
+        let mut events = stream;
+        while let Some(event) = events.next().await {
+            accumulator.apply(&event);
+            if accumulator.failed.is_some() {
+                break;
+            }
+        }
+        if let Some((message, retryable)) = accumulator.failed {
+            return upstream_chat_error(&message, retryable);
+        }
+        return Json(accumulator.response()).into_response();
+    }
+
+    let sse = stream.flat_map(move |event| {
+        let events = accumulator.apply(&event);
+        futures::stream::iter(events.into_iter().map(|(name, data)| {
+            Ok::<_, std::convert::Infallible>(SseEvent::default().event(name).data(data))
+        }))
     });
 
     Sse::new(sse).into_response()
