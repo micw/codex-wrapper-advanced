@@ -15,6 +15,7 @@
 //!   auth    — official OAuth flow, own CODEX_HOME
 //!   listen  — transport and access control
 //!   openai  — wire -> OpenAI format (pure translation)
+//!   metrics — what the running process observed; reads wire, writes nothing
 //!   serve   — REST API on top of client + auth
 //! ```
 //!
@@ -31,6 +32,7 @@
 pub mod auth;
 pub mod client;
 pub mod listen;
+pub mod metrics;
 pub mod openai;
 pub mod openai_chat;
 pub mod openai_responses;

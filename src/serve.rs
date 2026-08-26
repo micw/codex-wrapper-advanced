@@ -15,7 +15,7 @@
 //! |---|---|---|
 //! | `/v1/*` | OpenAI-compatible (`models`, `chat/completions`, `responses`) | yes |
 //! | `/wire/v1/*` | our own vocabulary (`wire::Event`) | yes |
-//! | `/health`, `/ready` | operations, probes | **no** |
+//! | `/health`, `/ready`, `/metrics` | operations, probes | **no** |
 //!
 //! `/v1` deliberately sits at the root rather than under `/api/openai/v1`: some
 //! clients take a host and append `/v1/chat/completions` themselves. `/wire/v1`
@@ -24,7 +24,7 @@
 //! ```nginx
 //! location /v1/      { proxy_pass http://127.0.0.1:8080; }
 //! location /wire/v1/ { proxy_pass http://127.0.0.1:8080; }
-//! location /         { return 404; }   # /health, /ready stay inside
+//! location /         { return 404; }   # /health, /ready, /metrics stay inside
 //! ```
 //!
 //! # Access control
@@ -60,6 +60,10 @@ use crate::auth;
 use crate::client::Client;
 use crate::listen::ApiKeys;
 use crate::listen::Listen;
+use crate::metrics::Metrics;
+use crate::metrics::SURFACE_CHAT;
+use crate::metrics::SURFACE_RESPONSES;
+use crate::metrics::SURFACE_WIRE;
 use crate::wire::ServerInfo;
 use crate::wire::StreamRequest;
 
@@ -68,6 +72,7 @@ struct AppState {
     client: Client,
     manager: Arc<AuthManager>,
     keys: ApiKeys,
+    metrics: Arc<Metrics>,
 }
 
 pub struct ServeConfig {
@@ -104,6 +109,7 @@ pub async fn run(config: ServeConfig) -> Result<()> {
         client: Client::new(manager.clone()),
         manager,
         keys,
+        metrics: Arc::new(Metrics::new()),
     };
 
     let wire_api = Router::new()
@@ -121,6 +127,7 @@ pub async fn run(config: ServeConfig) -> Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
+        .route("/metrics", get(metrics))
         .nest("/wire/v1", wire_api)
         .nest("/v1", openai_api)
         .with_state(state);
@@ -247,6 +254,16 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
     Json(json!({ "status": "ok", "authenticated": authenticated }))
 }
 
+/// `GET /metrics` — what this process has observed since it started.
+///
+/// Keyless, like `/health` and `/ready`, and for the same reason: it sits at the
+/// root, which the path layout keeps off the reverse proxy. Whoever can reach it
+/// is already inside. It carries no credential — only counters, latencies and
+/// the last quota reading.
+async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
+    Json(state.metrics.snapshot())
+}
+
 async fn auth_status(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -347,6 +364,7 @@ async fn responses(
         return unauthorized();
     };
 
+    let model = request.model.clone();
     let stream = match state.client.stream(request).await {
         Ok(stream) => stream,
         // Errors *before* the first event come back as an HTTP status, not as an
@@ -354,11 +372,14 @@ async fn responses(
         // would be harder for the caller to handle than a 400.
         Err(err) => {
             eprintln!("[{caller}] request rejected: {err}");
+            state.metrics.record_rejected(SURFACE_WIRE, err.status);
             return upstream_error(&err);
         }
     };
 
-    let sse = stream.map(|event| {
+    let mut recorder = state.metrics.start_turn(SURFACE_WIRE, &caller, &model);
+    let sse = stream.map(move |event| {
+        recorder.observe(&event);
         let payload = serde_json::to_string(&event)
             .unwrap_or_else(|err| format!(r#"{{"type":"failed","message":"{err}"}}"#));
         Ok::<_, std::convert::Infallible>(SseEvent::default().data(payload))
@@ -413,6 +434,7 @@ async fn openai_chat_completions(
         Ok(stream) => stream,
         Err(err) => {
             eprintln!("[{caller}] chat request rejected: {err}");
+            state.metrics.record_rejected(SURFACE_CHAT, err.status);
             return upstream_error(&err);
         }
     };
@@ -421,11 +443,13 @@ async fn openai_chat_completions(
     // `models_response` — a moving timestamp would make caches differ.
     let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
     let model = request.model;
+    let mut recorder = state.metrics.start_turn(SURFACE_CHAT, &caller, &model);
 
     if !streaming {
         let mut state = crate::openai_chat::ChatResponseState::default();
         let mut events = stream;
         while let Some(event) = events.next().await {
+            recorder.observe(&event);
             state.apply(&event, &id, &model, false);
             if state.failed.is_some() {
                 break;
@@ -439,6 +463,7 @@ async fn openai_chat_completions(
 
     let mut state = crate::openai_chat::ChatResponseState::default();
     let sse = stream.flat_map(move |event| {
+        recorder.observe(&event);
         let lines = state.apply(&event, &id, &model, include_usage);
         futures::stream::iter(
             lines
@@ -499,16 +524,21 @@ async fn openai_responses(
         Ok(stream) => stream,
         Err(err) => {
             eprintln!("[{caller}] responses request rejected: {err}");
+            state.metrics.record_rejected(SURFACE_RESPONSES, err.status);
             return upstream_error(&err);
         }
     };
 
     let id = format!("resp_{}", uuid::Uuid::new_v4().simple());
+    let mut recorder = state
+        .metrics
+        .start_turn(SURFACE_RESPONSES, &caller, &request.model);
     let mut accumulator = crate::openai_responses::ResponsesState::new(id, &request);
 
     if !streaming {
         let mut events = stream;
         while let Some(event) = events.next().await {
+            recorder.observe(&event);
             accumulator.apply(&event);
             if accumulator.failed.is_some() {
                 break;
@@ -521,6 +551,7 @@ async fn openai_responses(
     }
 
     let sse = stream.flat_map(move |event| {
+        recorder.observe(&event);
         let events = accumulator.apply(&event);
         futures::stream::iter(events.into_iter().map(|(name, data)| {
             Ok::<_, std::convert::Infallible>(SseEvent::default().event(name).data(data))
