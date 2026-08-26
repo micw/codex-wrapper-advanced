@@ -27,6 +27,13 @@
 //! `reasoning_summary_part.done` merely repeats the finished part; the running
 //! text is never rewritten.
 //!
+//! # Thinking needs no configuration
+//!
+//! The summary is requested for every turn ([`crate::client::build_body`]), so
+//! the thinking shows up without a client having to ask. `effort` only steers
+//! *how much* is thought, and both spellings are accepted — `reasoning.effort`
+//! and the Chat-Completions `reasoning_effort` — because clients send both.
+//!
 //! # Deliberately not supported: server-side state
 //!
 //! `previous_response_id` is rejected. Silently ignoring it would answer with
@@ -66,6 +73,15 @@ pub struct ResponsesRequest {
     pub parallel_tool_calls: Option<bool>,
     #[serde(default)]
     pub reasoning: Option<ReasoningConfig>,
+    /// The Chat-Completions spelling of `reasoning.effort`, accepted as a
+    /// fallback.
+    ///
+    /// Not part of the Responses spec, but Open WebUI sends it: its
+    /// `convert_to_responses_payload` rewrites messages, tools and
+    /// `max_tokens`, and leaves `reasoning_effort` at the top level untouched.
+    /// Ignoring it would silently drop the effort the user chose.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub stream: Option<bool>,
     /// Accepted and ignored — nothing is persisted here, so there is nothing to
@@ -83,8 +99,8 @@ pub struct ResponsesRequest {
 #[derive(Debug, Deserialize)]
 pub struct ReasoningConfig {
     /// Passed through verbatim; the backend rejects invalid values with a 400,
-    /// which is a better error than guessing here. Without it no `reasoning`
-    /// field is sent at all — and then no summary comes back.
+    /// which is a better error than guessing here. Without it the backend picks
+    /// its own effort — the summary comes either way.
     #[serde(default)]
     pub effort: Option<String>,
     /// `auto` | `concise` | `detailed`. Ignored: [`crate::client::build_body`]
@@ -131,12 +147,21 @@ pub fn to_wire(req: &ResponsesRequest) -> Result<StreamRequest, String> {
         input,
         instructions: req.instructions.clone(),
         tools: accepted_tools(req)?,
-        effort: req.reasoning.as_ref().and_then(|r| r.effort.clone()),
+        effort: effort(req),
         tool_choice: req.tool_choice.clone(),
         parallel_tool_calls: req.parallel_tool_calls,
         store: Some(false),
         session_id: None,
     })
+}
+
+/// The reasoning effort, from either spelling. Without one the backend picks its
+/// own; the summary is requested regardless.
+fn effort(req: &ResponsesRequest) -> Option<String> {
+    req.reasoning
+        .as_ref()
+        .and_then(|reasoning| reasoning.effort.clone())
+        .or_else(|| req.reasoning_effort.clone())
 }
 
 /// The tools that go upstream — and, unchanged, into the envelope.
@@ -870,6 +895,30 @@ mod tests {
         })))
         .unwrap();
         assert_eq!(wire.effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn the_chat_spelling_of_effort_is_accepted_too() {
+        // Open WebUI leaves `reasoning_effort` at the top level when it converts
+        // a chat payload to the Responses shape. Without this the chosen effort
+        // is silently lost.
+        let wire = to_wire(&request(json!({
+            "model": "m",
+            "input": "hi",
+            "reasoning_effort": "high",
+        })))
+        .unwrap();
+        assert_eq!(wire.effort.as_deref(), Some("high"));
+
+        // The Responses spelling wins where both are present.
+        let wire = to_wire(&request(json!({
+            "model": "m",
+            "input": "hi",
+            "reasoning": { "effort": "low" },
+            "reasoning_effort": "high",
+        })))
+        .unwrap();
+        assert_eq!(wire.effort.as_deref(), Some("low"));
     }
 
     #[test]

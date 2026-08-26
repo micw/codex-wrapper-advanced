@@ -96,7 +96,8 @@ enum Command {
         model: String,
 
         /// Reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`, `ultra`).
-        /// Without it no `reasoning` field is sent.
+        /// Without it the backend picks its own; the thinking summary comes
+        /// either way.
         #[arg(long)]
         effort: Option<String>,
 

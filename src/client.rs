@@ -163,12 +163,17 @@ pub fn build_body(req: &StreamRequest) -> Value {
         "tools".to_string(),
         req.tools.clone().unwrap_or_else(|| json!([])),
     );
+    // The summary is asked for unconditionally, the effort only when the caller
+    // named one. Measured (MESSUNGEN.md §3): the backend accepts `summary`
+    // without `effort`, the input tokens stay identical and the reasoning tokens
+    // fall either way — the turn thinks regardless, the summary only puts it into
+    // words. Tying the two together would leave a caller who sets no effort
+    // watching a silent pause followed by an answer out of nowhere.
+    let mut reasoning = json!({ "summary": "auto" });
     if let Some(effort) = &req.effort {
-        map.insert(
-            "reasoning".to_string(),
-            json!({ "effort": effort, "summary": "auto" }),
-        );
+        reasoning["effort"] = json!(effort);
     }
+    map.insert("reasoning".to_string(), reasoning);
     body
 }
 
