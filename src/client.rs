@@ -129,6 +129,85 @@ fn transport() -> ReqwestTransport {
     ReqwestTransport::from_http_client(default_client::create_client())
 }
 
+// --- Cache key -------------------------------------------------------------
+
+/// Derives a prompt cache key from the **invariant head** of a conversation.
+///
+/// Measured against the subscription backend: the cache is machine-local, and
+/// the key is what routes a request to the machine holding the prefix. Without
+/// one, a request lands somewhere in the pool and only hits by luck — 7/30 in a
+/// controlled run, and less than that in real traffic where other prefixes sit
+/// in between. With a key that stays the same across the turns of a
+/// conversation: 28/30.
+///
+/// What goes in, and why exactly this:
+///
+/// * `model` — two models never share a cache entry.
+/// * `instructions` — the system prompt, the largest stable block.
+/// * `tools` — part of the prefix, and stable for the life of a conversation.
+/// * **the first input item** — what separates two conversations that share a
+///   system prompt and a tool set. That is the common case for one agent
+///   holding many conversations.
+///
+/// What stays out: everything that can change between the turns of one
+/// conversation without breaking the token prefix. `effort` in particular — a
+/// caller raising it mid-conversation would otherwise lose the cache, although
+/// the prefix itself is untouched.
+///
+/// Two conversations whose heads are byte-identical share a key. That is
+/// harmless: measured, three different conversations under a single key all sat
+/// at 98 % — the key routes, the prefix decides the hit.
+///
+/// The counter-case is a head that is *cut off* mid-conversation (compaction, a
+/// sliding window). The key changes then — but so does the token prefix, so
+/// there was nothing left to hit anyway.
+pub fn cache_key(req: &StreamRequest) -> String {
+    // FNV-1a, deliberately not a crate and not `DefaultHasher`: this value has to
+    // stay identical across restarts of the daemon, otherwise a conversation
+    // loses its cache when the service is restarted. `DefaultHasher` gives no
+    // guarantee across Rust versions; a hash written out here does.
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = OFFSET;
+    let mut eat = |bytes: &[u8]| {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
+        // Separator, so ("ab", "c") and ("a", "bc") do not collapse into one.
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(PRIME);
+    };
+
+    eat(req.model.as_bytes());
+    eat(req.instructions.as_deref().unwrap_or("").as_bytes());
+    eat(req
+        .tools
+        .as_ref()
+        .map(|tools| tools.to_string())
+        .unwrap_or_default()
+        .as_bytes());
+    eat(req
+        .input
+        .first()
+        .map(|item| item.to_string())
+        .unwrap_or_default()
+        .as_bytes());
+
+    // The prefix makes the value recognisable in a backend-side log as coming
+    // from here, without carrying anything about the content.
+    format!("wrap-{hash:016x}")
+}
+
+/// The key actually sent: the caller's, or the derived one.
+///
+/// A caller who names a key knows more than we can derive — an OpenAI client
+/// sending `prompt_cache_key` or `user` has the conversation identity at hand.
+pub fn effective_cache_key(req: &StreamRequest) -> String {
+    req.session_id.clone().unwrap_or_else(|| cache_key(req))
+}
+
 // --- Request body ----------------------------------------------------------
 
 /// Builds the Responses body from a [`StreamRequest`].
@@ -174,6 +253,14 @@ pub fn build_body(req: &StreamRequest) -> Value {
         reasoning["effort"] = json!(effort);
     }
     map.insert("reasoning".to_string(), reasoning);
+    // Body field and `session-id` header carry the same value, as the official
+    // client does. Measured: each works on its own, and with both set to
+    // different values the entry is reachable under either — they are not
+    // separate namespaces. Setting both spares us the question of precedence.
+    map.insert(
+        "prompt_cache_key".to_string(),
+        json!(effective_cache_key(req)),
+    );
     body
 }
 
@@ -306,12 +393,10 @@ impl Client {
         let client = ResponsesClient::new(transport(), provider(), auth);
 
         let mut headers = HeaderMap::new();
-        if let Some(session_id) = &req.session_id {
-            headers.extend(codex_api::build_session_headers(
-                Some(session_id.clone()),
-                None,
-            ));
-        }
+        headers.extend(codex_api::build_session_headers(
+            Some(effective_cache_key(&req)),
+            None,
+        ));
 
         let upstream = client
             .stream(body, headers, Compression::None, /*turn_state*/ None)
@@ -537,12 +622,10 @@ pub async fn raw_stream(
         http::header::ACCEPT,
         HeaderValue::from_static("text/event-stream"),
     );
-    if let Some(session_id) = &req.session_id {
-        request.headers.extend(codex_api::build_session_headers(
-            Some(session_id.clone()),
-            None,
-        ));
-    }
+    request.headers.extend(codex_api::build_session_headers(
+        Some(effective_cache_key(req)),
+        None,
+    ));
     request.body = Some(RequestBody::Json(body));
 
     let request = match auth.apply_auth(request).await {
@@ -578,5 +661,144 @@ fn redact(name: &str, value: &HeaderValue) -> String {
         format!("{shown}... ({} characters)", text.len())
     } else {
         text.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn request(input: Vec<Value>) -> StreamRequest {
+        StreamRequest {
+            model: "gpt-5.6-sol".into(),
+            input,
+            instructions: Some("You are a code reviewer.".into()),
+            tools: Some(json!([{ "type": "function", "name": "read_file" }])),
+            effort: None,
+            tool_choice: None,
+            parallel_tool_calls: None,
+            store: Some(false),
+            session_id: None,
+        }
+    }
+
+    fn user(text: &str) -> Value {
+        json!({ "type": "message", "role": "user",
+                "content": [{ "type": "input_text", "text": text }] })
+    }
+
+    fn assistant(text: &str) -> Value {
+        json!({ "type": "message", "role": "assistant",
+                "content": [{ "type": "output_text", "text": text }] })
+    }
+
+    /// The point of the whole exercise: the history grows, the key does not
+    /// move. A key that changed per turn measured 0 hits out of 4.
+    #[test]
+    fn key_survives_a_growing_conversation() {
+        let turn1 = request(vec![user("Explain the parser.")]);
+        let turn2 = request(vec![
+            user("Explain the parser."),
+            assistant("It is a recursive descent parser."),
+            user("And the lexer?"),
+        ]);
+        let turn3 = request(vec![
+            user("Explain the parser."),
+            assistant("It is a recursive descent parser."),
+            user("And the lexer?"),
+            assistant("Hand-written."),
+            user("Any tests?"),
+        ]);
+        assert_eq!(cache_key(&turn1), cache_key(&turn2));
+        assert_eq!(cache_key(&turn2), cache_key(&turn3));
+    }
+
+    /// Two conversations that share a system prompt and a tool set must not
+    /// share a key just because of that — that is the everyday case for one
+    /// agent holding many conversations.
+    #[test]
+    fn different_first_message_gives_a_different_key() {
+        assert_ne!(
+            cache_key(&request(vec![user("Explain the parser.")])),
+            cache_key(&request(vec![user("Explain the lexer.")])),
+        );
+    }
+
+    /// Everything the token prefix is made of has to move the key.
+    #[test]
+    fn head_fields_all_move_the_key() {
+        let base = request(vec![user("Explain the parser.")]);
+        let key = cache_key(&base);
+
+        let mut other_model = request(vec![user("Explain the parser.")]);
+        other_model.model = "gpt-5.5".into();
+        assert_ne!(key, cache_key(&other_model));
+
+        let mut other_instructions = request(vec![user("Explain the parser.")]);
+        other_instructions.instructions = Some("You are a poet.".into());
+        assert_ne!(key, cache_key(&other_instructions));
+
+        let mut other_tools = request(vec![user("Explain the parser.")]);
+        other_tools.tools = Some(json!([{ "type": "function", "name": "write_file" }]));
+        assert_ne!(key, cache_key(&other_tools));
+    }
+
+    /// `effort` may change mid-conversation without touching the token prefix.
+    /// Folding it into the key would throw the cache away for nothing.
+    #[test]
+    fn effort_does_not_move_the_key() {
+        let base = request(vec![user("Explain the parser.")]);
+        let mut raised = request(vec![user("Explain the parser.")]);
+        raised.effort = Some("high".into());
+        assert_eq!(cache_key(&base), cache_key(&raised));
+    }
+
+    /// The separator between the parts: without it, moving a byte across a
+    /// field boundary would produce the same key.
+    #[test]
+    fn field_boundaries_are_separated() {
+        let mut a = request(vec![user("x")]);
+        a.instructions = Some("ab".into());
+        a.tools = Some(json!("c"));
+        let mut b = request(vec![user("x")]);
+        b.instructions = Some("a".into());
+        b.tools = Some(json!("bc"));
+        assert_ne!(cache_key(&a), cache_key(&b));
+    }
+
+    /// A caller who names a key knows more than we can derive.
+    #[test]
+    fn callers_key_wins() {
+        let mut req = request(vec![user("Explain the parser.")]);
+        req.session_id = Some("chat-42".into());
+        assert_eq!(effective_cache_key(&req), "chat-42");
+        req.session_id = None;
+        assert_eq!(effective_cache_key(&req), cache_key(&req));
+    }
+
+    /// Both places carry the key, and the same value — the header is set in
+    /// `stream`, the body field here.
+    #[test]
+    fn body_carries_the_cache_key() {
+        let req = request(vec![user("Explain the parser.")]);
+        let body = build_body(&req);
+        assert_eq!(body["prompt_cache_key"], json!(effective_cache_key(&req)));
+        assert!(
+            body["prompt_cache_key"]
+                .as_str()
+                .is_some_and(|key| key.starts_with("wrap-"))
+        );
+    }
+
+    /// Deterministic across processes: the value is written out here rather than
+    /// taken from `DefaultHasher`, so a restart does not cost a conversation its
+    /// cache. Pinned to a literal so a refactor cannot silently change it.
+    #[test]
+    fn key_is_stable_across_runs() {
+        let mut req = request(vec![user("Explain the parser.")]);
+        req.tools = None;
+        req.instructions = None;
+        assert_eq!(cache_key(&req), "wrap-d9d7a1e7bd87c778");
     }
 }

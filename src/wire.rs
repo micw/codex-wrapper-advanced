@@ -135,8 +135,16 @@ pub struct StreamRequest {
     pub parallel_tool_calls: Option<bool>,
     #[serde(default)]
     pub store: Option<bool>,
-    /// Sets the `session-id` header; the backend derives its `prompt_cache_key`
-    /// from it. Cache control therefore rests with the caller.
+    /// The prompt cache key: sets the `session-id` header and the body field of
+    /// the same name.
+    ///
+    /// **Optional, and absence is not neutral.** Left out, one is derived from
+    /// the invariant head of the conversation
+    /// ([`crate::client::cache_key`]) — because a request without a key does not
+    /// route to the machine holding its prefix and therefore almost never hits
+    /// the cache. Whoever names one overrides that; the only requirement is that
+    /// the value stays **the same across the turns of a conversation**. Its shape
+    /// is free — measured, the backend accepts arbitrary strings.
     #[serde(default)]
     pub session_id: Option<String>,
 }

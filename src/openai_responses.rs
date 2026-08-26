@@ -94,6 +94,19 @@ pub struct ResponsesRequest {
     /// Rejected in [`to_wire`]: without `store` there would be nothing to poll.
     #[serde(default)]
     pub background: Option<bool>,
+    /// OpenAI's own field for cache routing, honoured when present.
+    ///
+    /// Not a knob of ours: a client sending it means something by it, and
+    /// dropping it silently would be the trap this server avoids elsewhere.
+    /// It also covers the one case the derivation cannot — a client that cuts
+    /// the head off its conversation (compaction, a sliding window) knows its
+    /// own identity, where our hash would move with the cut.
+    ///
+    /// Deliberately **not** also `user`: that field names a person for abuse
+    /// monitoring, not a conversation. Reading it as a cache key would be our
+    /// invention, and it would put every conversation of one user on one key.
+    #[serde(default)]
+    pub prompt_cache_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,7 +164,10 @@ pub fn to_wire(req: &ResponsesRequest) -> Result<StreamRequest, String> {
         tool_choice: req.tool_choice.clone(),
         parallel_tool_calls: req.parallel_tool_calls,
         store: Some(false),
-        session_id: None,
+        // Absent, the key is derived from the invariant head in
+        // [`crate::client::cache_key`] — without it the prompt cache does not
+        // route and barely ever hits.
+        session_id: req.prompt_cache_key.clone().filter(|key| !key.is_empty()),
     })
 }
 
