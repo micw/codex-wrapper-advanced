@@ -22,14 +22,28 @@ const REJECTED_REASONING_LEVELS: &[&str] = &["ultra"];
 
 /// Accepted by the API but missing from `supported_reasoning_levels`.
 ///
-/// Measured 2026-08-27 on the same three models: `none` is taken and switches
-/// reasoning off (`reasoning_output_tokens: 0`). It is the one level a caller
-/// cannot otherwise reach, and the fastest one — worth listing.
+/// Measured 2026-08-27 across **all nine** models the subscription serves: eight
+/// take `none` and switch reasoning off (`reasoning_output_tokens: 0`). It is the
+/// one level a caller cannot otherwise reach, and the fastest one — worth listing.
 ///
 /// Deliberately not added: `minimal`. The backend names it in its generic error
-/// message, but for these models it answers `Unsupported value: 'minimal' is not
-/// supported with the 'gpt-5.6-sol' model`.
+/// message, but answers `Unsupported value: 'minimal' is not supported with the
+/// 'gpt-5.6-sol' model` for these models.
 const UNADVERTISED_REASONING_LEVEL: &str = "none";
+
+/// Models that reject [`UNADVERTISED_REASONING_LEVEL`].
+///
+/// The ninth model. `gpt-5.3-codex-spark` answers `Unsupported value: 'none' is
+/// not supported with the 'gpt-5.3-codex-spark' model. Supported values are:
+/// 'low', 'medium', 'high', and 'xhigh'` — for it, advertised and accepted
+/// already agree, so nothing is added.
+///
+/// Keyed by slug on purpose. `supports_reasoning_summary_parameter: false` is set
+/// on exactly this model too, and tempting to use as the rule — but that field is
+/// about summaries, not about effort levels, and tying the two together would be
+/// a guess dressed up as a mechanism. A measured list of slugs says what it is:
+/// an observation with a date, to be re-checked when models change.
+const NONE_UNSUPPORTED_MODELS: &[&str] = &["gpt-5.3-codex-spark"];
 
 /// Builds the response for `GET /v1/models`.
 ///
@@ -99,8 +113,11 @@ fn model_object(model: &Value) -> Value {
         })
         .unwrap_or_default();
     if !advertised.is_empty() {
+        let takes_none = !NONE_UNSUPPORTED_MODELS.contains(&slug);
         // `none` first: the list stays ordered by ascending effort.
-        let levels: Vec<&str> = std::iter::once(UNADVERTISED_REASONING_LEVEL)
+        let levels: Vec<&str> = takes_none
+            .then_some(UNADVERTISED_REASONING_LEVEL)
+            .into_iter()
             .chain(
                 advertised
                     .into_iter()
@@ -166,6 +183,23 @@ mod tests {
             !levels.as_array().unwrap().iter().any(|l| l == "ultra"),
             "ultra is advertised by the backend but rejected by it"
         );
+    }
+
+    /// Measured 2026-08-27: `gpt-5.3-codex-spark` is the one model that rejects
+    /// `none`. Adding it there would put the same unusable entry into the picker
+    /// that removing `ultra` was meant to get rid of.
+    #[test]
+    fn none_is_left_off_where_the_model_rejects_it() {
+        let models = [
+            backend_model("gpt-5.6-sol", "list"),
+            backend_model("gpt-5.3-codex-spark", "list"),
+        ];
+        let data = models_response(&models, false);
+        assert_eq!(
+            data["data"][0]["reasoning_levels"],
+            json!(["none", "low", "high"])
+        );
+        assert_eq!(data["data"][1]["reasoning_levels"], json!(["low", "high"]));
     }
 
     /// A model that advertises no levels keeps advertising none. Listing `none`
