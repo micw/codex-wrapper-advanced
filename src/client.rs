@@ -421,8 +421,14 @@ impl Client {
     /// brings along for free.
     pub async fn stream(
         &self,
-        req: StreamRequest,
+        mut req: StreamRequest,
     ) -> Result<impl Stream<Item = Event> + use<>, UpstreamError> {
+        // `gpt-5.6-sol:long` is the same model with a different budget in the
+        // caller's head. Stripped here rather than per surface, so the cache key
+        // and the body both see the name the backend knows — and both variants
+        // therefore share a cache entry, which is right: the requests are
+        // identical.
+        req.model = crate::models::wire_model(&req.model).to_string();
         let body = build_body(&req);
         let auth: SharedAuthProvider = Arc::new(ManagedChatGptAuth {
             manager: self.manager.clone(),

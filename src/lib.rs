@@ -34,7 +34,7 @@ pub mod client;
 pub mod limits;
 pub mod listen;
 pub mod metrics;
-pub mod openai;
+pub mod models;
 pub mod openai_chat;
 pub mod openai_responses;
 pub mod serve;

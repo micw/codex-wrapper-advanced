@@ -312,7 +312,10 @@ async fn models(
         return unauthorized();
     }
     match state.client.models(&query.client_version).await {
-        Ok(models) => Json(json!({ "models": models })).into_response(),
+        // Projected, not passed through: the raw objects carry ~17 KB of
+        // instruction template each, and the catalogue contradicts the backend's
+        // own behaviour in three measured places. See `crate::models`.
+        Ok(models) => Json(crate::models::catalogue(&models)).into_response(),
         Err(err) => upstream_error(&err),
     }
 }
@@ -335,34 +338,21 @@ async fn usage(State(state): State<AppState>, headers: HeaderMap) -> axum::respo
     }
 }
 
-#[derive(Deserialize)]
-struct OpenAiModelsQuery {
-    /// Also list models with `visibility: hide` — on the subscription that is
-    /// `codex-auto-review`. Off by default so a model picker does not get
-    /// cluttered with internals.
-    #[serde(default)]
-    include_hidden: bool,
-}
-
-/// `GET /v1/models` — OpenAI shape.
+/// `GET /v1/models` — OpenAI shape, and deliberately opinionated.
 ///
-/// A slim projection rather than a pass-through; the reasoning is in
-/// [`crate::openai::models_response`]. Callers who need the backend's raw data
-/// use `/wire/v1/models`.
+/// Hidden models are dropped, and a model carries **one** context length because
+/// that is what an OpenAI client expects. Where the extra budget is worth
+/// offering, it appears as a second entry (`gpt-5.6-sol:long`) — see
+/// [`crate::models`]. `/wire/v1/models` carries both values for every model.
 async fn openai_models(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<OpenAiModelsQuery>,
 ) -> axum::response::Response {
     if state.keys.authenticate(&headers).is_none() {
         return unauthorized();
     }
     match state.client.models(crate::DEFAULT_CLIENT_VERSION).await {
-        Ok(models) => Json(crate::openai::models_response(
-            &models,
-            query.include_hidden,
-        ))
-        .into_response(),
+        Ok(models) => Json(crate::models::openai_list(&models)).into_response(),
         Err(err) => upstream_error(&err),
     }
 }
