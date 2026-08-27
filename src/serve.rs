@@ -41,6 +41,7 @@ use anyhow::Context as _;
 use anyhow::Result;
 use axum::Json;
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::extract::Query;
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
@@ -66,6 +67,13 @@ use crate::metrics::SURFACE_RESPONSES;
 use crate::metrics::SURFACE_WIRE;
 use crate::wire::ServerInfo;
 use crate::wire::StreamRequest;
+
+/// Keep this aligned with the reverse proxy's `client_max_body_size 32m`.
+///
+/// Axum's JSON extractor otherwise stops at its 2 MiB default, which makes the
+/// wrapper the hidden bottleneck for long conversations after nginx accepted
+/// them already.
+const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone)]
 struct AppState {
@@ -130,6 +138,7 @@ pub async fn run(config: ServeConfig) -> Result<()> {
         .route("/metrics", get(metrics))
         .nest("/wire/v1", wire_api)
         .nest("/v1", openai_api)
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(state);
 
     match listen {
