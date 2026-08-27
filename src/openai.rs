@@ -11,6 +11,26 @@
 use serde_json::Value;
 use serde_json::json;
 
+/// Reasoning levels `/models` advertises that the API then rejects.
+///
+/// Measured 2026-08-27 against `gpt-5.6-{sol,terra,luna}`: `ultra` is listed in
+/// `supported_reasoning_levels` for sol and terra, and every request carrying it
+/// comes back `400 Invalid value: 'ultra'`. Passing it on would put a value into
+/// a model picker that cannot be picked — the same trap the tool list avoids by
+/// rejecting unsupported types outright instead of dropping them silently.
+const REJECTED_REASONING_LEVELS: &[&str] = &["ultra"];
+
+/// Accepted by the API but missing from `supported_reasoning_levels`.
+///
+/// Measured 2026-08-27 on the same three models: `none` is taken and switches
+/// reasoning off (`reasoning_output_tokens: 0`). It is the one level a caller
+/// cannot otherwise reach, and the fastest one — worth listing.
+///
+/// Deliberately not added: `minimal`. The backend names it in its generic error
+/// message, but for these models it answers `Unsupported value: 'minimal' is not
+/// supported with the 'gpt-5.6-sol' model`.
+const UNADVERTISED_REASONING_LEVEL: &str = "none";
+
 /// Builds the response for `GET /v1/models`.
 ///
 /// **A slim projection, not a pass-through.** Each backend object carries a
@@ -63,7 +83,12 @@ fn model_object(model: &Value) -> Value {
     if let Some(window) = model.get("context_window").and_then(Value::as_i64) {
         map.insert("context_length".to_string(), json!(window));
     }
-    let levels: Vec<&str> = model
+    // Corrected against what the API actually takes, not passed through: the
+    // backend's own catalogue disagrees with its own validation in both
+    // directions. See the two constants above for the measurements. A model that
+    // advertises nothing keeps advertising nothing — `none` alone would be an
+    // invention, and this module invents nothing.
+    let advertised: Vec<&str> = model
         .get("supported_reasoning_levels")
         .and_then(Value::as_array)
         .map(|entries| {
@@ -73,7 +98,15 @@ fn model_object(model: &Value) -> Value {
                 .collect()
         })
         .unwrap_or_default();
-    if !levels.is_empty() {
+    if !advertised.is_empty() {
+        // `none` first: the list stays ordered by ascending effort.
+        let levels: Vec<&str> = std::iter::once(UNADVERTISED_REASONING_LEVEL)
+            .chain(
+                advertised
+                    .into_iter()
+                    .filter(|level| !REJECTED_REASONING_LEVELS.contains(level)),
+            )
+            .collect();
         map.insert("reasoning_levels".to_string(), json!(levels));
     }
 
@@ -91,7 +124,7 @@ mod tests {
             "visibility": visibility,
             "context_window": 272_000,
             "supported_reasoning_levels": [
-                { "effort": "low" }, { "effort": "high" }
+                { "effort": "low" }, { "effort": "high" }, { "effort": "ultra" }
             ],
             // The reason for the projection: large, and unwanted here.
             "model_messages": { "instructions_template": "x".repeat(17_000) },
@@ -117,6 +150,35 @@ mod tests {
         let response = models_response(&models, false);
         assert!(response["data"][0].get("model_messages").is_none());
         assert!(serde_json::to_string(&response).unwrap().len() < 500);
+    }
+
+    /// The backend's catalogue disagrees with its own validation. A picker fed
+    /// straight from it offers `ultra`, which every request carrying it answers
+    /// with a 400, and hides `none`, which works.
+    #[test]
+    fn reasoning_levels_match_what_the_api_accepts() {
+        let models = [backend_model("gpt-5.6-sol", "list")];
+        let response = models_response(&models, false);
+        let levels = response["data"][0]["reasoning_levels"].clone();
+
+        assert_eq!(levels, json!(["none", "low", "high"]));
+        assert!(
+            !levels.as_array().unwrap().iter().any(|l| l == "ultra"),
+            "ultra is advertised by the backend but rejected by it"
+        );
+    }
+
+    /// A model that advertises no levels keeps advertising none. Listing `none`
+    /// on its own would be an invention.
+    #[test]
+    fn a_model_without_levels_gets_no_list() {
+        let mut model = backend_model("gpt-5.6-sol", "list");
+        model
+            .as_object_mut()
+            .unwrap()
+            .remove("supported_reasoning_levels");
+        let response = models_response(&[model], false);
+        assert!(response["data"][0].get("reasoning_levels").is_none());
     }
 
     #[test]
