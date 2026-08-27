@@ -25,14 +25,6 @@ pub struct Usage {
     pub total_tokens: Option<i64>,
 }
 
-/// One window of the subscription quota.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RateLimitWindow {
-    pub used_percent: Option<f64>,
-    pub window_minutes: Option<i64>,
-    pub resets_at: Option<i64>,
-}
-
 /// Events of a running turn.
 ///
 /// `tag = "type"` makes dispatch on the consumer side a trivial lookup of
@@ -91,12 +83,13 @@ pub enum Event {
         /// Plain-text summary, already extracted for display.
         summary: Vec<String>,
     },
-    /// Subscription quota. Arrives once per turn, before the first text.
-    RateLimits {
-        plan: Option<String>,
-        primary: Option<RateLimitWindow>,
-        secondary: Option<RateLimitWindow>,
-    },
+    /// Subscription quota. Arrives **once** per turn, before the first text.
+    ///
+    /// Built from the response headers, not from the upstream events: those come
+    /// one per header family and carry no group identity, which makes two of them
+    /// indistinguishable on a model with its own quota. See
+    /// [`crate::limits`] for the projection and the one rule behind it.
+    RateLimits(crate::limits::TurnLimits),
     Done {
         response_id: Option<String>,
         /// `end_turn` | `aborted` — deliberately narrow. Nothing else has been

@@ -121,7 +121,7 @@ pub async fn run(config: ServeConfig) -> Result<()> {
     };
 
     let wire_api = Router::new()
-        .route("/auth", get(auth_status))
+        .route("/whoami", get(whoami))
         .route("/usage", get(usage))
         .route("/models", get(models))
         .route("/responses", post(responses));
@@ -273,10 +273,12 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     Json(state.metrics.snapshot())
 }
 
-async fn auth_status(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> axum::response::Response {
+/// `GET /wire/v1/whoami` — who we are signed in as, straight from the token.
+///
+/// Needs no request to the backend. The `plan` here is the token's claim and
+/// therefore fixed at issue time; the one in `/wire/v1/usage` is what the backend
+/// reports now. The two can differ, and that is information, not a contradiction.
+async fn whoami(State(state): State<AppState>, headers: HeaderMap) -> axum::response::Response {
     if state.keys.authenticate(&headers).is_none() {
         return unauthorized();
     }
@@ -315,12 +317,20 @@ async fn models(
     }
 }
 
+/// `GET /wire/v1/usage` — the account's quota, in the same shape a turn reports.
+///
+/// A request of its own, but the only source that answers "limit reached?" and
+/// always carries **all** groups. A turn's event is free but sees the global
+/// group only while it is the active one.
 async fn usage(State(state): State<AppState>, headers: HeaderMap) -> axum::response::Response {
     if state.keys.authenticate(&headers).is_none() {
         return unauthorized();
     }
     match state.client.usage().await {
-        Ok(usage) => Json(usage).into_response(),
+        // Projected, not passed through: the same shape a turn's `rate_limits`
+        // event carries, so a consumer never has to know which source an object
+        // came from. See `crate::limits`.
+        Ok(usage) => Json(crate::limits::UsageReport::from_usage(&usage)).into_response(),
         Err(err) => upstream_error(&err),
     }
 }

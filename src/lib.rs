@@ -31,6 +31,7 @@
 
 pub mod auth;
 pub mod client;
+pub mod limits;
 pub mod listen;
 pub mod metrics;
 pub mod openai;

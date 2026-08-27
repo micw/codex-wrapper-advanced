@@ -25,8 +25,8 @@ use std::time::Instant;
 use serde_json::Value;
 use serde_json::json;
 
+use crate::limits::TurnLimits;
 use crate::wire::Event;
-use crate::wire::RateLimitWindow;
 use crate::wire::Usage;
 
 /// Latency samples kept per band. Bounded so a long-running process cannot grow
@@ -59,15 +59,13 @@ struct Inner {
     tokens: Tokens,
     total_ms: VecDeque<f64>,
     ttft_ms: VecDeque<f64>,
-    /// Every window of the most recent turn, in arrival order.
+    /// The most recent turn's quota, resolved.
     ///
-    /// Deliberately a list: the backend sends **several** `rate_limits` events
-    /// per turn — the account's 7-day quota and, separately, additional
-    /// per-model limits. `wire::Event::RateLimits` does not tell them apart, so
-    /// keeping only the last one would drop the account quota in favour of a
-    /// limit that reads 0 %. Until the wire vocabulary distinguishes them, all of
-    /// them are reported and the consumer decides.
-    rate_limits: Vec<RateLimitSnapshot>,
+    /// One object, not a list: since 1.3.0 the daemon builds a single event per
+    /// turn from the response headers, with the groups told apart and the
+    /// duplicated default family already dropped (see [`crate::limits`]).
+    limits: Option<TurnLimits>,
+    limits_updated_at: Option<i64>,
 }
 
 #[derive(Default)]
@@ -85,13 +83,6 @@ struct ModelStats {
     requests: u64,
     input: i64,
     cached: i64,
-}
-
-struct RateLimitSnapshot {
-    plan: Option<String>,
-    primary: Option<RateLimitWindow>,
-    secondary: Option<RateLimitWindow>,
-    updated_at: i64,
 }
 
 impl Metrics {
@@ -126,7 +117,6 @@ impl Metrics {
             ttft_ms: None,
             usage: None,
             outcome: None,
-            rate_limits_seen: 0,
         }
     }
 
@@ -142,25 +132,10 @@ impl Metrics {
         }
     }
 
-    /// `replace` starts a new turn's series, otherwise the window is appended to
-    /// the one already running.
-    fn update_rate_limit(
-        &self,
-        replace: bool,
-        plan: Option<String>,
-        primary: Option<RateLimitWindow>,
-        secondary: Option<RateLimitWindow>,
-    ) {
+    fn update_limits(&self, limits: TurnLimits) {
         let mut inner = self.lock();
-        if replace {
-            inner.rate_limits.clear();
-        }
-        inner.rate_limits.push(RateLimitSnapshot {
-            plan,
-            primary,
-            secondary,
-            updated_at: chrono::Utc::now().timestamp(),
-        });
+        inner.limits = Some(limits);
+        inner.limits_updated_at = Some(chrono::Utc::now().timestamp());
     }
 
     fn finish_turn(&self, turn: &TurnRecorder, outcome: &str) -> String {
@@ -249,16 +224,8 @@ impl Metrics {
                 "ttft": band(&inner.ttft_ms),
             },
             "models": models,
-            "rate_limits": inner
-                .rate_limits
-                .iter()
-                .map(|rl| json!({
-                    "plan": rl.plan,
-                    "primary": rl.primary,
-                    "secondary": rl.secondary,
-                    "updated_at": rl.updated_at,
-                }))
-                .collect::<Vec<_>>(),
+            "limits": inner.limits,
+            "limits_updated_at": inner.limits_updated_at,
         })
     }
 
@@ -287,9 +254,6 @@ pub struct TurnRecorder {
     ttft_ms: Option<f64>,
     usage: Option<Usage>,
     outcome: Option<String>,
-    /// Counts this turn's `RateLimits` events so the first one starts a fresh
-    /// series instead of appending to the previous turn's.
-    rate_limits_seen: usize,
 }
 
 impl TurnRecorder {
@@ -306,20 +270,10 @@ impl TurnRecorder {
             {
                 self.ttft_ms = Some(self.start.elapsed().as_secs_f64() * 1000.0);
             }
-            Event::RateLimits {
-                plan,
-                primary,
-                secondary,
-            } => {
+            Event::RateLimits(limits) => {
                 if let Some(metrics) = &self.metrics {
-                    metrics.update_rate_limit(
-                        self.rate_limits_seen == 0,
-                        plan.clone(),
-                        primary.clone(),
-                        secondary.clone(),
-                    );
+                    metrics.update_limits(limits.clone());
                 }
-                self.rate_limits_seen += 1;
             }
             Event::Done {
                 stop_reason, usage, ..
@@ -444,6 +398,28 @@ mod tests {
         }
     }
 
+    fn limits(plan: &str, active: &str) -> crate::limits::TurnLimits {
+        crate::limits::TurnLimits {
+            account: crate::limits::Account {
+                plan: Some(crate::limits::Plan {
+                    id: plan.to_string(),
+                    name: None,
+                }),
+                ..Default::default()
+            },
+            limits: crate::limits::Limits {
+                active_group: Some(active.to_string()),
+                groups: vec![crate::limits::Group {
+                    id: active.to_string(),
+                    name: None,
+                    reached: None,
+                    primary: None,
+                    secondary: None,
+                }],
+            },
+        }
+    }
+
     fn done(input: i64, cached: i64, output: i64) -> Event {
         Event::Done {
             response_id: Some("resp_1".into()),
@@ -555,63 +531,38 @@ mod tests {
         assert_eq!(snap["error_rate"], 1.0);
     }
 
-    /// The rate limit comes from the turn's own event, not from a separate call.
+    /// The quota comes from the turn itself, already resolved: one object with
+    /// the groups told apart, not a list of nameless windows.
     #[test]
-    fn rate_limit_is_taken_from_the_stream() {
+    fn quota_is_taken_from_the_turn() {
         let metrics = Arc::new(Metrics::new());
         {
             let mut turn = metrics.start_turn(SURFACE_WIRE, "local", "gpt-5.6-sol");
-            turn.observe(&Event::RateLimits {
-                plan: Some("prolite".into()),
-                primary: Some(RateLimitWindow {
-                    used_percent: Some(46.0),
-                    window_minutes: Some(10080),
-                    resets_at: Some(1788273291),
-                }),
-                secondary: None,
-            });
+            turn.observe(&Event::RateLimits(limits("prolite", "global")));
             turn.observe(&done(10, 0, 1));
         }
         let snap = metrics.snapshot();
-        assert_eq!(snap["rate_limits"][0]["plan"], "prolite");
-        assert_eq!(snap["rate_limits"][0]["primary"]["used_percent"], 46.0);
+        assert_eq!(snap["limits"]["account"]["plan"]["id"], "prolite");
+        assert_eq!(snap["limits"]["limits"]["active_group"], "global");
+        assert!(snap["limits_updated_at"].is_i64());
     }
 
-    /// The backend sends several windows per turn. None of them may be lost, and
-    /// the next turn must not append to the previous turn's series.
+    /// The next turn replaces the previous state instead of piling onto it.
     #[test]
-    fn every_rate_limit_window_of_a_turn_is_kept() {
-        fn window(percent: f64, minutes: i64) -> Event {
-            Event::RateLimits {
-                plan: None,
-                primary: Some(RateLimitWindow {
-                    used_percent: Some(percent),
-                    window_minutes: Some(minutes),
-                    resets_at: None,
-                }),
-                secondary: None,
-            }
-        }
+    fn a_later_turn_replaces_the_quota() {
         let metrics = Arc::new(Metrics::new());
-        {
+        for group in ["global", "codex_bengalfox"] {
             let mut turn = metrics.start_turn(SURFACE_WIRE, "local", "gpt-5.6-sol");
-            turn.observe(&window(46.0, 10080));
-            turn.observe(&window(0.0, 300));
+            turn.observe(&Event::RateLimits(limits("prolite", group)));
             turn.observe(&done(10, 0, 1));
         }
         let snap = metrics.snapshot();
-        assert_eq!(snap["rate_limits"].as_array().map(Vec::len), Some(2));
-        assert_eq!(snap["rate_limits"][0]["primary"]["window_minutes"], 10080);
-        assert_eq!(snap["rate_limits"][1]["primary"]["window_minutes"], 300);
-
-        {
-            let mut turn = metrics.start_turn(SURFACE_WIRE, "local", "gpt-5.6-sol");
-            turn.observe(&window(47.0, 10080));
-            turn.observe(&done(10, 0, 1));
-        }
-        let snap = metrics.snapshot();
-        assert_eq!(snap["rate_limits"].as_array().map(Vec::len), Some(1));
-        assert_eq!(snap["rate_limits"][0]["primary"]["used_percent"], 47.0);
+        assert_eq!(snap["limits"]["limits"]["active_group"], "codex_bengalfox");
+        assert_eq!(
+            snap["limits"]["limits"]["groups"].as_array().map(Vec::len),
+            Some(1),
+            "not accumulated across turns"
+        );
     }
 
     /// Turns without usage must not drag the hit rate towards zero — a request
@@ -634,7 +585,7 @@ mod tests {
         assert!(snap["latency_ms"]["total"]["p50"].is_null());
         assert_eq!(snap["latency_ms"]["total"]["n"], 0);
         assert_eq!(snap["cache"]["hit_rate"], 0.0);
-        assert_eq!(snap["rate_limits"].as_array().map(Vec::len), Some(0));
+        assert!(snap["limits"].is_null());
     }
 
     #[test]

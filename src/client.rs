@@ -5,6 +5,7 @@
 //! above (daemon, CLI) sees `wire::Event` exclusively.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -24,6 +25,9 @@ use codex_http_client::OutboundProxyPolicy;
 use codex_http_client::Request;
 use codex_http_client::RequestBody;
 use codex_http_client::ReqwestTransport;
+use codex_http_client::Response;
+use codex_http_client::StreamResponse;
+use codex_http_client::TransportError;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::default_client;
@@ -37,8 +41,8 @@ use http::Method;
 use serde_json::Value;
 use serde_json::json;
 
+use crate::limits::TurnLimits;
 use crate::wire::Event;
-use crate::wire::RateLimitWindow;
 use crate::wire::StreamRequest;
 use crate::wire::Usage;
 
@@ -127,6 +131,39 @@ fn provider() -> Provider {
 
 fn transport() -> ReqwestTransport {
     ReqwestTransport::from_http_client(default_client::create_client())
+}
+
+/// Keeps a copy of the response headers on their way past.
+///
+/// `codex-api` consumes them inside `spawn_response_stream` and only forwards
+/// what its own types model — which drops `x-codex-active-limit` and
+/// `x-codex-plan-type` entirely, and hard-codes `plan_type: None`
+/// (`rate_limits.rs:98`). Without those two, a turn's quota groups cannot be
+/// resolved (see [`crate::limits`]).
+///
+/// The seam is the library's own: `HttpTransport` is public and
+/// `ResponsesClient` generic over it, so this needs no fork and no rebuilt SSE
+/// decoding. If the trait changes, the build breaks — which is the good kind of
+/// dependency, unlike data that quietly turns into something else.
+struct HeaderTap<T> {
+    inner: T,
+    seen: Arc<Mutex<Option<HeaderMap>>>,
+}
+
+impl<T: HttpTransport> HttpTransport for HeaderTap<T> {
+    async fn execute(&self, req: Request) -> Result<Response, TransportError> {
+        self.inner.execute(req).await
+    }
+
+    async fn stream(&self, req: Request) -> Result<StreamResponse, TransportError> {
+        let response = self.inner.stream(req).await?;
+        // Locked only after the await — a guard held across it would make the
+        // future non-`Send` and the trait bound would reject it.
+        if let Ok(mut seen) = self.seen.lock() {
+            *seen = Some(response.headers.clone());
+        }
+        Ok(response)
+    }
 }
 
 // --- Cache key -------------------------------------------------------------
@@ -390,7 +427,15 @@ impl Client {
         let auth: SharedAuthProvider = Arc::new(ManagedChatGptAuth {
             manager: self.manager.clone(),
         });
-        let client = ResponsesClient::new(transport(), provider(), auth);
+        let seen = Arc::new(Mutex::new(None));
+        let client = ResponsesClient::new(
+            HeaderTap {
+                inner: transport(),
+                seen: seen.clone(),
+            },
+            provider(),
+            auth,
+        );
 
         let mut headers = HeaderMap::new();
         headers.extend(codex_api::build_session_headers(
@@ -402,7 +447,18 @@ impl Client {
             .stream(body, headers, Compression::None, /*turn_state*/ None)
             .await?;
 
-        Ok(map_events(upstream))
+        // The tap has run by now: the transport returns before the stream is
+        // spawned. One event per turn, built from the headers themselves —
+        // upstream would emit one per header family, without telling them apart.
+        let quota: Vec<Event> = seen
+            .lock()
+            .ok()
+            .and_then(|mut seen| seen.take())
+            .map(|headers| Event::RateLimits(TurnLimits::from_headers(&headers)))
+            .into_iter()
+            .collect();
+
+        Ok(futures::stream::iter(quota).chain(map_events(upstream)))
     }
 
     /// The subscription's model list.
@@ -561,11 +617,10 @@ fn map_one(event: ResponseEvent, slot: &ServerModelSlot) -> Vec<Event> {
             // Message items only repeat what already arrived as deltas.
             _ => vec![],
         },
-        ResponseEvent::RateLimits(snapshot) => vec![Event::RateLimits {
-            plan: snapshot.plan_type.map(|p| format!("{p:?}")),
-            primary: snapshot.primary.map(map_window),
-            secondary: snapshot.secondary.map(map_window),
-        }],
+        // Dropped on purpose: one per header family, no group identity, and
+        // `plan_type` always `None` on this path. `Client::stream` builds a single
+        // resolved event from the headers instead.
+        ResponseEvent::RateLimits(_) => vec![],
         ResponseEvent::Completed {
             response_id,
             token_usage,
@@ -591,14 +646,6 @@ fn map_one(event: ResponseEvent, slot: &ServerModelSlot) -> Vec<Event> {
         // Everything else (ModelsEtag, OutputItemAdded, SafetyBuffering, ...) has
         // no taker in this vocabulary.
         _ => vec![],
-    }
-}
-
-fn map_window(window: codex_protocol::protocol::RateLimitWindow) -> RateLimitWindow {
-    RateLimitWindow {
-        used_percent: Some(window.used_percent),
-        window_minutes: window.window_minutes,
-        resets_at: window.resets_at,
     }
 }
 

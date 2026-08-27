@@ -270,8 +270,24 @@ fn print_event(event: &Event) {
                 .unwrap_or(0);
             eprintln!("\n[reasoning] {summary:?} (encrypted_content: {bytes} characters)")
         }
-        Event::RateLimits { plan, primary, .. } => {
-            eprintln!("[rate-limits] plan={plan:?} primary={primary:?}")
+        Event::RateLimits(limits) => {
+            let plan = limits.account.plan.as_ref().map(|plan| plan.id.as_str());
+            let groups: Vec<String> = limits
+                .limits
+                .groups
+                .iter()
+                .map(|group| {
+                    let used = group.primary.as_ref().map_or("?".to_string(), |window| {
+                        format!("{:.0}%", window.used_percent)
+                    });
+                    format!("{}={used}", group.id)
+                })
+                .collect();
+            eprintln!(
+                "[rate-limits] plan={plan:?} active={:?} {}",
+                limits.limits.active_group,
+                groups.join(" ")
+            )
         }
         Event::Done {
             stop_reason, usage, ..

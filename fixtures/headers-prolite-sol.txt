@@ -1,0 +1,24 @@
+x-codex-active-limit: premium
+x-codex-bengalfox-limit-name: GPT-5.3-Codex-Spark
+x-codex-bengalfox-primary-over-secondary-limit-percent: 0
+x-codex-bengalfox-primary-reset-after-seconds: 17627
+x-codex-bengalfox-primary-reset-at: 1787870998
+x-codex-bengalfox-primary-used-percent: 0
+x-codex-bengalfox-primary-window-minutes: 300
+x-codex-bengalfox-secondary-reset-after-seconds: 558949
+x-codex-bengalfox-secondary-reset-at: 1788412321
+x-codex-bengalfox-secondary-used-percent: 0
+x-codex-bengalfox-secondary-window-minutes: 10080
+x-codex-credits-balance: 0
+x-codex-credits-has-credits: False
+x-codex-credits-unlimited: False
+x-codex-plan-type: prolite
+x-codex-primary-over-secondary-limit-percent: 0
+x-codex-primary-reset-after-seconds: 604372
+x-codex-primary-reset-at: 1788457743
+x-codex-primary-used-percent: 0
+x-codex-primary-window-minutes: 10080
+x-codex-secondary-reset-after-seconds: 0
+x-codex-secondary-reset-at: 
+x-codex-secondary-used-percent: 0
+x-codex-secondary-window-minutes: 0
