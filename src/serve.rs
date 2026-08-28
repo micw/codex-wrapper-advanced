@@ -66,6 +66,7 @@ use crate::metrics::SURFACE_CHAT;
 use crate::metrics::SURFACE_RESPONSES;
 use crate::metrics::SURFACE_WIRE;
 use crate::wire::ServerInfo;
+use crate::wire::ServiceInfo;
 use crate::wire::StreamRequest;
 
 /// Keep this aligned with the reverse proxy's `client_max_body_size 32m`.
@@ -121,6 +122,7 @@ pub async fn run(config: ServeConfig) -> Result<()> {
     };
 
     let wire_api = Router::new()
+        .route("/info", get(info))
         .route("/whoami", get(whoami))
         .route("/usage", get(usage))
         .route("/models", get(models))
@@ -278,6 +280,21 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
 /// Needs no request to the backend. The `plan` here is the token's claim and
 /// therefore fixed at issue time; the one in `/wire/v1/usage` is what the backend
 /// reports now. The two can differ, and that is information, not a contradiction.
+/// `GET /wire/v1/info` — which service, which build.
+///
+/// Answers without asking the backend and without touching the sign-in state:
+/// a consumer must be able to find out what it is talking to even while the
+/// daemon cannot work. `/ready` is the endpoint for the latter question.
+///
+/// Behind the API key like the rest of `/wire/v1`, though it carries nothing
+/// secret — one rule per prefix is worth more than an exception.
+async fn info(State(state): State<AppState>, headers: HeaderMap) -> axum::response::Response {
+    if state.keys.authenticate(&headers).is_none() {
+        return unauthorized();
+    }
+    Json(ServiceInfo::current()).into_response()
+}
+
 async fn whoami(State(state): State<AppState>, headers: HeaderMap) -> axum::response::Response {
     if state.keys.authenticate(&headers).is_none() {
         return unauthorized();

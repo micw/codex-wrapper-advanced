@@ -196,6 +196,40 @@ pub struct ReadyStatus {
     pub access_token_expires_in_seconds: Option<i64>,
 }
 
+/// Response of `GET /wire/v1/info` — what a consumer is talking to.
+///
+/// Deliberately narrow. The **contract** version already sits in the path
+/// (`/wire/v1`); a field for it here would be a second truth about the same
+/// thing. And capabilities belong where they apply: what the models can do is
+/// in `/wire/v1/models`, how full the quota is in `/wire/v1/usage`. A third
+/// place summarising both would be a copy that goes stale.
+///
+/// `version` is the release version. A consumer branching on it branches on the
+/// wrong thing — that is what the path version is for. It is good for logs, bug
+/// reports and the question whether a deployment already runs the new build.
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceInfo {
+    pub service: &'static str,
+    pub version: &'static str,
+}
+
+impl ServiceInfo {
+    /// Both values come from `Cargo.toml` via `env!`, so they cannot drift from
+    /// the crate they describe — the failure mode a hand-kept constant has.
+    pub fn current() -> Self {
+        Self {
+            service: env!("CARGO_PKG_NAME"),
+            version: env!("CARGO_PKG_VERSION"),
+        }
+    }
+}
+
+impl Default for ServiceInfo {
+    fn default() -> Self {
+        Self::current()
+    }
+}
+
 /// Written to stdout on startup so the parent process knows where to connect.
 /// Pattern borrowed from `codex-responses-api-proxy`.
 ///
@@ -206,4 +240,27 @@ pub struct ServerInfo {
     /// `unix:/path` or `http://127.0.0.1:8080`.
     pub listen: String,
     pub pid: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The narrowness **is** the contract: two fields, and anything growing here
+    /// has to be a decision rather than an oversight.
+    #[test]
+    fn service_info_stays_narrow() {
+        let value = serde_json::to_value(ServiceInfo::current()).expect("serialises");
+        let object = value.as_object().expect("an object");
+        assert_eq!(
+            object.len(),
+            2,
+            "info carries service and version, nothing else"
+        );
+        assert_eq!(object["service"], "codex-api-wrapper");
+        assert!(
+            !object["version"].as_str().unwrap_or_default().is_empty(),
+            "version comes from Cargo.toml and can never be empty"
+        );
+    }
 }
