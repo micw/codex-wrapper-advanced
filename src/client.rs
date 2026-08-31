@@ -844,6 +844,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn native_image_input_reaches_the_upstream_unchanged() {
+        let image = json!({
+            "type": "message",
+            "role": "user",
+            "content": [
+                { "type": "input_text", "text": "describe" },
+                {
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,iVBORw0KGgo="
+                }
+            ]
+        });
+        let req = request(vec![image.clone()]);
+        let body = build_body(&req);
+        assert_eq!(body["input"][0], image);
+    }
+
     /// Deterministic across processes: the value is written out here rather than
     /// taken from `DefaultHasher`, so a restart does not cost a conversation its
     /// cache. Pinned to a literal so a refactor cannot silently change it.

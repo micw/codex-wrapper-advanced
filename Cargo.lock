@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "codex-api-wrapper"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "axum",

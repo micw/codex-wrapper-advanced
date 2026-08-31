@@ -67,8 +67,8 @@ pub struct StreamOptions {
 pub struct ChatMessage {
     pub role: String,
     /// String in the classic shape, array of parts in the multimodal shape.
-    /// Only the text is carried over; images have no path into the Responses
-    /// subscription backend.
+    /// Text and `image_url` parts are translated to their Responses spellings.
+    /// Malformed or unknown parts are rejected rather than silently disappearing.
     #[serde(default)]
     pub content: Value,
     #[serde(default)]
@@ -116,7 +116,7 @@ pub fn to_wire(req: &ChatRequest) -> Result<StreamRequest, String> {
                 input.push(json!({
                     "type": "message",
                     "role": "user",
-                    "content": content_parts(&msg.content),
+                    "content": content_parts(&msg.content)?,
                 }));
             }
             "assistant" => {
@@ -227,26 +227,35 @@ fn content_text(content: &Value) -> Option<String> {
     }
 }
 
-fn content_parts(content: &Value) -> Value {
+fn content_parts(content: &Value) -> Result<Value, String> {
     match content {
-        Value::String(text) => json!([{ "type": "input_text", "text": text }]),
-        Value::Array(parts) => Value::Array(
-            parts
-                .iter()
-                .filter_map(|part| match part.get("type").and_then(Value::as_str) {
-                    Some("text") => part
-                        .get("text")
+        Value::String(text) => Ok(json!([{ "type": "input_text", "text": text }])),
+        Value::Array(parts) => parts
+            .iter()
+            .map(|part| match part.get("type").and_then(Value::as_str) {
+                Some("text") => part
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(|text| json!({ "type": "input_text", "text": text }))
+                    .ok_or_else(|| "text content part is missing its text".to_string()),
+                Some("image_url") => {
+                    let image = part.get("image_url").unwrap_or(&Value::Null);
+                    let url = image
+                        .get("url")
+                        .or(Some(image))
                         .and_then(Value::as_str)
-                        .map(|text| json!({ "type": "input_text", "text": text })),
-                    Some("image_url") => part
-                        .get("image_url")
-                        .and_then(|image| image.get("url"))
-                        .map(|url| json!({ "type": "input_image", "image_url": url })),
-                    _ => None,
-                })
-                .collect(),
-        ),
-        _ => json!([{ "type": "input_text", "text": "" }]),
+                        .filter(|url| !url.is_empty())
+                        .ok_or_else(|| {
+                            "image_url content part is missing a non-empty URL".to_string()
+                        })?;
+                    Ok(json!({ "type": "input_image", "image_url": url }))
+                }
+                Some(kind) => Err(format!("unsupported user content part type {kind:?}")),
+                None => Err("user content part is missing its type".to_string()),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        _ => Err("user message content must be a string or an array of parts".to_string()),
     }
 }
 
@@ -444,6 +453,44 @@ mod tests {
         assert_eq!(wire.instructions.as_deref(), Some("be brief"));
         assert_eq!(wire.input.len(), 1);
         assert_eq!(wire.input[0]["role"], "user");
+    }
+
+    #[test]
+    fn image_url_becomes_an_input_image() {
+        let req: ChatRequest = serde_json::from_value(json!({
+            "model": "m",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "describe" },
+                    { "type": "image_url", "image_url": {
+                        "url": "data:image/png;base64,iVBORw0KGgo="
+                    }}
+                ]
+            }]
+        }))
+        .unwrap();
+        let wire = to_wire(&req).unwrap();
+        assert_eq!(wire.input[0]["content"][0]["type"], "input_text");
+        assert_eq!(wire.input[0]["content"][1]["type"], "input_image");
+        assert_eq!(
+            wire.input[0]["content"][1]["image_url"],
+            "data:image/png;base64,iVBORw0KGgo="
+        );
+    }
+
+    #[test]
+    fn malformed_or_unknown_content_is_rejected_not_dropped() {
+        for content in [
+            json!([{ "type": "image_url", "image_url": {} }]),
+            json!([{ "type": "audio", "data": "..." }]),
+        ] {
+            let req: ChatRequest = serde_json::from_value(json!({
+                "model": "m", "messages": [{ "role": "user", "content": content }]
+            }))
+            .unwrap();
+            assert!(to_wire(&req).is_err());
+        }
     }
 
     #[test]

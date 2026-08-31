@@ -235,7 +235,7 @@ fn normalise_item(item: &Value) -> Result<Value, String> {
     Ok(json!({
         "type": "message",
         "role": role,
-        "content": content_parts(content, role),
+        "content": content_parts(content, role)?,
     }))
 }
 
@@ -245,37 +245,40 @@ fn normalise_item(item: &Value) -> Result<Value, String> {
 /// everything else `input_text`. An unknown part is passed on rather than
 /// dropped — then the backend's error names it, instead of the turn quietly
 /// losing content.
-fn content_parts(content: &Value, role: &str) -> Value {
+fn content_parts(content: &Value, role: &str) -> Result<Value, String> {
     let text_type = if role == "assistant" {
         "output_text"
     } else {
         "input_text"
     };
     match content {
-        Value::String(text) => json!([{ "type": text_type, "text": text }]),
-        Value::Array(parts) => Value::Array(
-            parts
-                .iter()
-                .map(|part| match part.get("type").and_then(Value::as_str) {
-                    // Chat spellings a client may still send.
-                    Some("text") => json!({
-                        "type": text_type,
-                        "text": part.get("text").and_then(Value::as_str).unwrap_or(""),
-                    }),
-                    Some("image_url") => json!({
-                        "type": "input_image",
-                        "image_url": part.get("image_url")
-                            .and_then(|image| image.get("url"))
-                            .or_else(|| part.get("image_url"))
-                            .cloned()
-                            .unwrap_or(Value::Null),
-                    }),
-                    _ => part.clone(),
-                })
-                .collect(),
-        ),
-        Value::Null => json!([{ "type": text_type, "text": "" }]),
-        other => json!([{ "type": text_type, "text": other.to_string() }]),
+        Value::String(text) => Ok(json!([{ "type": text_type, "text": text }])),
+        Value::Array(parts) => parts
+            .iter()
+            .map(|part| match part.get("type").and_then(Value::as_str) {
+                // Chat spellings a client may still send.
+                Some("text") => Ok(json!({
+                    "type": text_type,
+                    "text": part.get("text").and_then(Value::as_str).unwrap_or(""),
+                })),
+                Some("image_url") => {
+                    let url = part
+                        .get("image_url")
+                        .and_then(|image| image.get("url"))
+                        .or_else(|| part.get("image_url"))
+                        .and_then(Value::as_str)
+                        .filter(|url| !url.is_empty())
+                        .ok_or_else(|| {
+                            "image_url content part is missing a non-empty URL".to_string()
+                        })?;
+                    Ok(json!({ "type": "input_image", "image_url": url }))
+                }
+                _ => Ok(part.clone()),
+            })
+            .collect::<Result<Vec<_>, String>>()
+            .map(Value::Array),
+        Value::Null => Ok(json!([{ "type": text_type, "text": "" }])),
+        other => Ok(json!([{ "type": text_type, "text": other.to_string() }])),
     }
 }
 
@@ -878,6 +881,37 @@ mod tests {
         })))
         .unwrap();
         assert_eq!(wire.input[1]["content"][0]["type"], "output_text");
+    }
+
+    #[test]
+    fn chat_shaped_image_parts_are_normalised_and_validated() {
+        let wire = to_wire(&request(json!({
+            "model": "m",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "image_url",
+                    "image_url": { "url": "data:image/png;base64,iVBORw0KGgo=" }
+                }]
+            }]
+        })))
+        .unwrap();
+        assert_eq!(wire.input[0]["content"][0]["type"], "input_image");
+        assert_eq!(
+            wire.input[0]["content"][0]["image_url"],
+            "data:image/png;base64,iVBORw0KGgo="
+        );
+
+        let err = to_wire(&request(json!({
+            "model": "m",
+            "input": [{
+                "type": "message", "role": "user",
+                "content": [{ "type": "image_url", "image_url": {} }]
+            }]
+        })))
+        .unwrap_err();
+        assert!(err.contains("non-empty URL"));
     }
 
     #[test]
