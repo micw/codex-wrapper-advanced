@@ -27,6 +27,8 @@ use codex_login::run_device_code_login;
 use codex_login::run_login_server;
 use codex_login::token_data::parse_jwt_expiration;
 
+use crate::auth_recovery::AuthHealth;
+
 /// Our own credential directory, deliberately separate from `~/.codex`.
 ///
 /// This must neither read nor overwrite an existing Codex installation: a broken
@@ -148,13 +150,17 @@ pub async fn login_device(probe_only: bool) -> Result<()> {
 /// logged URL therefore lets nobody get at existing credentials; at most it lets
 /// them bind the service to a different account. Logs containing it still do not
 /// belong in other people's hands.
-pub async fn login_reminder(manager: Arc<AuthManager>, interval: Duration) {
+pub(crate) async fn login_reminder(
+    manager: Arc<AuthManager>,
+    health: Arc<AuthHealth>,
+    interval: Duration,
+) {
     // Do not retry immediately after a failure: without network that would flood
     // the log.
     const BACKOFF: Duration = Duration::from_secs(60);
 
     loop {
-        if readiness(&manager).await.ready {
+        if readiness(&manager, &health).await.ready {
             tokio::time::sleep(interval).await;
             continue;
         }
@@ -163,7 +169,7 @@ pub async fn login_reminder(manager: Arc<AuthManager>, interval: Duration) {
             tokio::time::sleep(BACKOFF).await;
             continue;
         };
-        let status = readiness(&manager).await;
+        let status = readiness(&manager, &health).await;
         let opts = server_options(codex_home);
 
         let code = match request_device_code(&opts).await {
@@ -208,6 +214,10 @@ fn announce_login(status: &crate::wire::ReadyStatus, url: &str, user_code: &str)
         "token_expired" => "access token expired".to_string(),
         "refresh_failed" => format!(
             "refresh failed permanently: {}",
+            status.detail.as_deref().unwrap_or("no reason reported")
+        ),
+        "upstream_unauthorized" => format!(
+            "backend rejected authentication: {}",
             status.detail.as_deref().unwrap_or("no reason reported")
         ),
         other => other.to_string(),
@@ -263,7 +273,7 @@ pub async fn current_auth(manager: &AuthManager) -> Result<CodexAuth> {
 
 /// Operational readiness — the basis of the readiness probe.
 ///
-/// Checks three things, in this order:
+/// Checks four things, in this order:
 ///
 /// 1. **Signed in?** After a first rollout usually not yet.
 /// 2. **Refresh permanently failed?** `auth()` swallows refresh errors and
@@ -272,7 +282,12 @@ pub async fn current_auth(manager: &AuthManager) -> Result<CodexAuth> {
 ///    surfaces.
 /// 3. **Access token still valid?** Catches the case where the refresh was never
 ///    attempted, e.g. because the process only started after expiry.
-pub async fn readiness(manager: &AuthManager) -> crate::wire::ReadyStatus {
+/// 4. **Backend accepted this token?** A server-side invalidation can precede the
+///    JWT expiry. This state is set only after reload and refresh were exhausted.
+pub(crate) async fn readiness(
+    manager: &AuthManager,
+    health: &AuthHealth,
+) -> crate::wire::ReadyStatus {
     let not_ready = |reason, detail, secs| crate::wire::ReadyStatus {
         ready: false,
         reason,
@@ -298,6 +313,9 @@ pub async fn readiness(manager: &AuthManager) -> crate::wire::ReadyStatus {
     }
     if expires_in.is_some_and(|secs| secs <= 0) {
         return not_ready("token_expired", None, expires_in);
+    }
+    if let Some(detail) = health.rejection_for(&auth) {
+        return not_ready("upstream_unauthorized", Some(detail), expires_in);
     }
 
     crate::wire::ReadyStatus {

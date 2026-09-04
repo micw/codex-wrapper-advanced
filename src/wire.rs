@@ -186,10 +186,10 @@ pub struct AuthStatus {
 #[derive(Debug, Clone, Serialize)]
 pub struct ReadyStatus {
     pub ready: bool,
-    /// `ok` | `not_authenticated` | `refresh_failed` | `token_expired`
+    /// `ok` | `not_authenticated` | `refresh_failed` | `token_expired` |
+    /// `upstream_unauthorized`
     pub reason: &'static str,
-    /// The upstream's own wording on `refresh_failed` — it says whether the token
-    /// expired, was already used, or was revoked.
+    /// Refresh/rejection detail without credentials.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

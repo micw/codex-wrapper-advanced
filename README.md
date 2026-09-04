@@ -423,6 +423,20 @@ URL im Browser öffnen, Code eintippen — der Dienst pollt selbst und ist danac
 bereit. Intervall über `--login-reminder <sekunden>` (Default 300, `0` schaltet
 es ab). Solange alles läuft, bleibt das Log still.
 
+Ein `401 Unauthorized` des Backends löst vorher automatisch die offizielle,
+begrenzte Recovery aus `codex-login` aus: zuerst wird ein möglicherweise extern
+erneuertes `auth.json` geladen, beim zweiten 401 wird das Token aktiv am
+OAuth-Server erneuert. Nach jedem Schritt wird der ursprüngliche Request genau
+einmal wiederholt; mehr als drei Backend-Versuche gibt es nicht. Das deckt auch
+Tokens ab, die nach einem Tarifwechsel serverseitig schon abgelehnt werden,
+obwohl ihr JWT-`exp` noch in der Zukunft liegt.
+
+Lehnt das Backend auch das erneuerte Token ab, meldet `/ready` dauerhaft
+`503 upstream_unauthorized` und der Login-Reminder bietet einen neuen Device-Code
+an. Der Zustand hängt am Fingerprint des tatsächlich gesendeten Tokens: eine spät
+eintreffende 401-Antwort eines alten parallelen Requests kann einen inzwischen
+erfolgreichen Login nicht wieder auf „kaputt“ setzen.
+
 **Warum kein Login-Endpoint:** ein solcher wäre mächtiger als jeder
 Inferenz-Endpoint — wer ihn erreicht, könnte den Dienst an ein anderes Konto
 hängen oder ihn per Dauer-Relogin lahmlegen. Über das Log braucht es dafür keinen
@@ -870,7 +884,9 @@ dekodierte Pfad wegabstrahiert (`instructions`, `tools`, `prompt_cache_key`,
 - **Credentials als Datei**, nicht im OS-Keyring. Inspizierbar, und ein gelöschter
   Ordner lässt nichts zurück.
 - **Token bei jedem Request neu geholt** über `AuthManager::auth()`, statt einmal
-  als Snapshot. Erneuert ein abgelaufenes Access-Token unterwegs.
+  als Snapshot. Erneuert ein abgelaufenes Access-Token unterwegs; ein vorzeitig
+  vom Backend abgelehntes Token durchläuft zusätzlich die oben beschriebene
+  reaktive 401-Recovery.
 - **Request-Body als freies JSON**, nicht über `ResponsesApiRequest`. Für ein
   Erkundungswerkzeug ist beliebige Variierbarkeit von `instructions` und `tools`
   der Punkt.
@@ -893,11 +909,12 @@ dekodierte Pfad wegabstrahiert (`instructions`, `tools`, `prompt_cache_key`,
 - **Metriken überleben keinen Neustart** und aggregieren nicht über Prozesse. Für
   einen Dienst, der als ein Prozess läuft, ist das gewollt — als Kontingentbuch
   taugt es nicht, dafür ist `/wire/v1/usage` da.
-- **Tests nur für die Übersetzungsschichten und die Metriken.** `cargo test` deckt
-  `openai`, `openai_chat`, `openai_responses` und `metrics` ab — reine Abbildung
-  bzw. Buchführung, ohne Gegenstelle. Alles darunter (Auth, Transport, `client`)
-  bräuchte ein Mock-Backend, das es noch nicht gibt. `scripts/measure.py` prüft
-  nichts, es *zeigt* — Bewertung macht der Mensch.
+- **Kein Live-Auth-Test.** `cargo test` prüft neben Übersetzung und Metriken die
+  komplette 401-Zustandsmaschine mit einer geskripteten Gegenstelle: Erfolg,
+  Reload, Refresh, erschöpfte Recovery, Recovery-Fehler, fremde HTTP-Status und
+  verspätete Antworten alter Tokens. Dabei wird weder ein echtes Token gelesen
+  noch ein echter Refresh-Token rotiert. `scripts/measure.py` prüft dagegen
+  nichts, es *zeigt* gegen die echte Gegenstelle — Bewertung macht der Mensch.
 
 ## Lizenz / Attribution
 

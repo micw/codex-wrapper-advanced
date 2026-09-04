@@ -30,6 +30,7 @@
 //! out. See the README.
 
 pub mod auth;
+mod auth_recovery;
 pub mod client;
 pub mod limits;
 pub mod listen;

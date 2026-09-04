@@ -41,6 +41,9 @@ use http::Method;
 use serde_json::Value;
 use serde_json::json;
 
+use crate::auth_recovery::AuthHealth;
+use crate::auth_recovery::AuthTracker;
+use crate::auth_recovery::run_with_unauthorized_recovery;
 use crate::limits::TurnLimits;
 use crate::wire::Event;
 use crate::wire::StreamRequest;
@@ -59,6 +62,7 @@ const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 /// all further requests, because they all share the same `AuthManager`.
 struct ManagedChatGptAuth {
     manager: Arc<AuthManager>,
+    tracker: AuthTracker,
 }
 
 fn apply_auth_headers(auth: &CodexAuth, headers: &mut HeaderMap) {
@@ -92,6 +96,7 @@ impl AuthProvider for ManagedChatGptAuth {
                 .auth()
                 .await
                 .ok_or_else(|| AuthError::Build("not signed in".to_string()))?;
+            self.tracker.record(&auth);
             let mut headers = HeaderMap::new();
             apply_auth_headers(&auth, &mut headers);
             if !headers.contains_key(http::header::AUTHORIZATION) {
@@ -408,11 +413,25 @@ impl From<codex_api::ApiError> for UpstreamError {
 #[derive(Clone)]
 pub struct Client {
     manager: Arc<AuthManager>,
+    auth_health: Arc<AuthHealth>,
 }
 
 impl Client {
     pub fn new(manager: Arc<AuthManager>) -> Self {
-        Self { manager }
+        Self {
+            manager,
+            auth_health: Arc::new(AuthHealth::default()),
+        }
+    }
+
+    pub(crate) fn with_auth_health(
+        manager: Arc<AuthManager>,
+        auth_health: Arc<AuthHealth>,
+    ) -> Self {
+        Self {
+            manager,
+            auth_health,
+        }
     }
 
     /// Starts a turn and yields the events as a stream.
@@ -430,54 +449,73 @@ impl Client {
         // identical.
         req.model = crate::models::wire_model(&req.model).to_string();
         let body = build_body(&req);
-        let auth: SharedAuthProvider = Arc::new(ManagedChatGptAuth {
-            manager: self.manager.clone(),
-        });
-        let seen = Arc::new(Mutex::new(None));
-        let client = ResponsesClient::new(
-            HeaderTap {
-                inner: transport(),
-                seen: seen.clone(),
-            },
-            provider(),
-            auth,
-        );
-
         let mut headers = HeaderMap::new();
         headers.extend(codex_api::build_session_headers(
             Some(effective_cache_key(&req)),
             None,
         ));
 
-        let upstream = client
-            .stream(body, headers, Compression::None, /*turn_state*/ None)
-            .await?;
+        let (upstream, quota) =
+            run_with_unauthorized_recovery(&self.manager, &self.auth_health, |tracker| {
+                let auth: SharedAuthProvider = Arc::new(ManagedChatGptAuth {
+                    manager: self.manager.clone(),
+                    tracker,
+                });
+                let seen = Arc::new(Mutex::new(None));
+                let client = ResponsesClient::new(
+                    HeaderTap {
+                        inner: transport(),
+                        seen: seen.clone(),
+                    },
+                    provider(),
+                    auth,
+                );
+                let body = body.clone();
+                let headers = headers.clone();
+                async move {
+                    let upstream = client
+                        .stream(body, headers, Compression::None, /*turn_state*/ None)
+                        .await
+                        .map_err(UpstreamError::from)?;
 
-        // The tap has run by now: the transport returns before the stream is
-        // spawned. One event per turn, built from the headers themselves —
-        // upstream would emit one per header family, without telling them apart.
-        let quota: Vec<Event> = seen
-            .lock()
-            .ok()
-            .and_then(|mut seen| seen.take())
-            .map(|headers| Event::RateLimits(TurnLimits::from_headers(&headers)))
-            .into_iter()
-            .collect();
+                    // The tap has run by now: the transport returns before the
+                    // stream is spawned. Build one resolved quota event from the
+                    // headers rather than codex-api's lossy snapshots.
+                    let quota: Vec<Event> = seen
+                        .lock()
+                        .ok()
+                        .and_then(|mut seen| seen.take())
+                        .map(|headers| Event::RateLimits(TurnLimits::from_headers(&headers)))
+                        .into_iter()
+                        .collect();
+                    Ok((upstream, quota))
+                }
+            })
+            .await?;
 
         Ok(futures::stream::iter(quota).chain(map_events(upstream)))
     }
 
     /// The subscription's model list.
     pub async fn models(&self, client_version: &str) -> Result<Vec<Value>, UpstreamError> {
-        let provider = provider();
-        let auth: SharedAuthProvider = Arc::new(ManagedChatGptAuth {
-            manager: self.manager.clone(),
-        });
-        let client = codex_api::ModelsClient::new(transport(), provider.clone(), auth);
-        let url =
-            codex_api::ModelsClient::<ReqwestTransport>::request_url(&provider, client_version);
-
-        let (models, _etag) = client.list_models(url, HeaderMap::new()).await?;
+        let models = run_with_unauthorized_recovery(&self.manager, &self.auth_health, |tracker| {
+            let provider = provider();
+            let auth: SharedAuthProvider = Arc::new(ManagedChatGptAuth {
+                manager: self.manager.clone(),
+                tracker,
+            });
+            let client = codex_api::ModelsClient::new(transport(), provider.clone(), auth);
+            let url =
+                codex_api::ModelsClient::<ReqwestTransport>::request_url(&provider, client_version);
+            async move {
+                let (models, _etag) = client
+                    .list_models(url, HeaderMap::new())
+                    .await
+                    .map_err(UpstreamError::from)?;
+                Ok(models)
+            }
+        })
+        .await?;
 
         // Via serde_json so the daemon passes the upstream structure through
         // unchanged. What the backend declares should not be filtered here — the
@@ -490,41 +528,45 @@ impl Client {
 
     /// Reads the subscription usage and rate-limit snapshot.
     pub async fn usage(&self) -> Result<Value, UpstreamError> {
-        let auth = self
-            .manager
-            .auth()
-            .await
-            .ok_or_else(|| UpstreamError::local("not signed in"))?;
-        let mut headers = HeaderMap::new();
-        headers.extend(default_client::default_headers());
-        apply_auth_headers(&auth, &mut headers);
-        let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
-        let http = default_client::create_client_with_chatgpt_cookies(&factory);
-        let client = ReqwestTransport::from_http_client(http);
-        let mut request = Request::new(
-            Method::GET,
-            "https://chatgpt.com/backend-api/wham/usage".to_string(),
-        );
-        request.headers = headers;
-        let response = client
-            .execute(request)
-            .await
-            .map_err(|err| UpstreamError::local(format!("usage request failed: {err}")))?;
-        let status = response.status;
-        let body = String::from_utf8_lossy(&response.body).to_string();
-        let value = serde_json::from_str(&body).map_err(|err| UpstreamError {
-            status: Some(status.as_u16()),
-            message: format!("invalid usage response: {err}"),
-            body: None,
-        })?;
-        if !status.is_success() {
-            return Err(UpstreamError {
+        run_with_unauthorized_recovery(&self.manager, &self.auth_health, |tracker| async move {
+            let auth = self
+                .manager
+                .auth()
+                .await
+                .ok_or_else(|| UpstreamError::local("not signed in"))?;
+            tracker.record(&auth);
+            let mut headers = HeaderMap::new();
+            headers.extend(default_client::default_headers());
+            apply_auth_headers(&auth, &mut headers);
+            let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
+            let http = default_client::create_client_with_chatgpt_cookies(&factory);
+            let client = ReqwestTransport::from_http_client(http);
+            let mut request = Request::new(
+                Method::GET,
+                "https://chatgpt.com/backend-api/wham/usage".to_string(),
+            );
+            request.headers = headers;
+            let response = client
+                .execute(request)
+                .await
+                .map_err(|err| UpstreamError::local(format!("usage request failed: {err}")))?;
+            let status = response.status;
+            let body = String::from_utf8_lossy(&response.body).to_string();
+            let value = serde_json::from_str(&body).map_err(|err| UpstreamError {
                 status: Some(status.as_u16()),
-                message: body,
-                body: Some(value),
-            });
-        }
-        Ok(value)
+                message: format!("invalid usage response: {err}"),
+                body: None,
+            })?;
+            if !status.is_success() {
+                return Err(UpstreamError {
+                    status: Some(status.as_u16()),
+                    message: body,
+                    body: Some(value),
+                });
+            }
+            Ok(value)
+        })
+        .await
     }
 }
 
@@ -668,7 +710,10 @@ pub async fn raw_stream(
     mut on_meta: impl FnMut(&str),
 ) -> Result<impl Stream<Item = Result<bytes::Bytes, String>>> {
     let provider = provider();
-    let auth = ManagedChatGptAuth { manager };
+    let auth = ManagedChatGptAuth {
+        manager,
+        tracker: AuthTracker::default(),
+    };
 
     let mut request = provider.build_request(Method::POST, "responses");
     request.headers.insert(

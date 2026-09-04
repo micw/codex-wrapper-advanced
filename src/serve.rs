@@ -58,6 +58,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::auth;
+use crate::auth_recovery::AuthHealth;
 use crate::client::Client;
 use crate::listen::ApiKeys;
 use crate::listen::Listen;
@@ -80,6 +81,7 @@ const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 struct AppState {
     client: Client,
     manager: Arc<AuthManager>,
+    auth_health: Arc<AuthHealth>,
     keys: ApiKeys,
     metrics: Arc<Metrics>,
 }
@@ -105,18 +107,24 @@ pub async fn run(config: ServeConfig) -> Result<()> {
     crate::listen::validate(&listen, &keys)?;
 
     let manager = auth::auth_manager().await?;
+    let auth_health = Arc::new(AuthHealth::default());
 
     // Runs alongside the server: while not signed in, a sign-in URL goes to the
     // log at regular intervals, and the login completes as soon as somebody
     // confirms the code. Replaces a login endpoint along with its attack surface
     // — see auth::login_reminder.
     if let Some(interval) = login_reminder {
-        tokio::spawn(auth::login_reminder(manager.clone(), interval));
+        tokio::spawn(auth::login_reminder(
+            manager.clone(),
+            auth_health.clone(),
+            interval,
+        ));
     }
 
     let state = AppState {
-        client: Client::new(manager.clone()),
+        client: Client::with_auth_health(manager.clone(), auth_health.clone()),
         manager,
+        auth_health,
         keys,
         metrics: Arc::new(Metrics::new()),
     };
@@ -238,7 +246,7 @@ fn announce(listen: &Listen, server_info: Option<&Path>) -> Result<()> {
 /// keeps reporting a valid sign-in while the refresh has long since failed for
 /// good (DEPLOY.md §1).
 async fn ready(State(state): State<AppState>) -> axum::response::Response {
-    let status = auth::readiness(&state.manager).await;
+    let status = auth::readiness(&state.manager, &state.auth_health).await;
     let code = if status.ready {
         StatusCode::OK
     } else {
