@@ -51,7 +51,7 @@ pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 /// Appended to `/models` as the `client_version` query parameter. Taken from the
 /// most recent upstream release tag, because the repo checkout itself carries
 /// `0.0.0` (the real version is only substituted at release time).
-pub const DEFAULT_CLIENT_VERSION: &str = "0.150.0";
+pub const DEFAULT_CLIENT_VERSION: &str = "0.153.4";
 
 /// Builds an `input` array holding a single user message.
 ///
