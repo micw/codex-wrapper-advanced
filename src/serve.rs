@@ -261,13 +261,14 @@ async fn ready(State(state): State<AppState>) -> axum::response::Response {
 /// liveness to the sign-in state and Kubernetes will kill the container in a
 /// loop before anybody can exec in and sign in.
 ///
-/// `authenticated` is a hint for the eye only. The readiness probe is `/ready`'s
-/// job: `authenticated` stays `true` even when the refresh fails permanently.
+/// `authenticated` is a cached hint for the eye only. It deliberately neither
+/// refreshes nor waits for the process-shared auth lock: a login may hold that
+/// lock while waiting for a human, but liveness must keep answering. The
+/// readiness probe is `/ready`'s job.
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let authenticated = state
         .manager
-        .auth()
-        .await
+        .auth_cached()
         .map(|auth| auth.is_chatgpt_auth())
         .unwrap_or(false);
     Json(json!({ "status": "ok", "authenticated": authenticated }))

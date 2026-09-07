@@ -1,9 +1,19 @@
 use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
+use codex_config::types::AuthCredentialsStoreMode;
+use codex_http_client::HttpClientFactory;
+use codex_http_client::OutboundProxyPolicy;
+use codex_login::AuthDotJson;
+use codex_login::AuthKeyringBackendKind;
 use codex_login::AuthManager;
+use codex_login::AuthRouteConfig;
 use codex_login::CodexAuth;
+use codex_login::save_auth;
+use codex_protocol::auth::AuthMode;
 use serde_json::json;
 
 use super::*;
@@ -39,7 +49,7 @@ impl Recovery for ScriptedRecovery {
             .unwrap_or("done")
     }
 
-    async fn next(&mut self) -> Result<(), String> {
+    async fn next(&mut self, _rejected: Option<AuthFingerprint>) -> Result<(), String> {
         self.steps
             .lock()
             .unwrap()
@@ -63,6 +73,41 @@ fn upstream(status: u16) -> UpstreamError {
 
 fn record(tracker: &AuthTracker, auth: &CodexAuth) {
     tracker.record(auth);
+}
+
+fn save_api_key(codex_home: &Path, token: &str) {
+    save_auth(
+        codex_home,
+        &AuthDotJson {
+            auth_mode: Some(AuthMode::ApiKey),
+            openai_api_key: Some(token.to_string()),
+            tokens: None,
+            last_refresh: None,
+            agent_identity: None,
+            personal_access_token: None,
+            bedrock_api_key: None,
+        },
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .unwrap();
+}
+
+async fn file_manager(codex_home: &Path) -> Arc<AuthManager> {
+    Arc::new(
+        AuthManager::new(
+            codex_home.to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            AuthCredentialsStoreMode::File,
+            /*forced_chatgpt_workspace_id*/ None,
+            /*chatgpt_base_url*/ None,
+            AuthKeyringBackendKind::default(),
+            AuthRouteConfig::from_http_client_factory(HttpClientFactory::new(
+                OutboundProxyPolicy::ReqwestDefault,
+            )),
+        )
+        .await,
+    )
 }
 
 #[tokio::test]
@@ -251,13 +296,48 @@ async fn final_backend_rejection_makes_readiness_fail_until_success() {
     let health = AuthHealth::default();
 
     health.mark_unauthorized(&manager, fingerprint(&auth), "new token rejected");
-    let rejected = crate::auth::readiness(&manager, &health).await;
+    let rejected = crate::auth::readiness_with_auth(&manager, &health, Some(auth.clone()));
     assert!(!rejected.ready);
     assert_eq!(rejected.reason, "upstream_unauthorized");
     assert_eq!(rejected.detail.as_deref(), Some("new token rejected"));
 
     health.mark_success(fingerprint(&auth));
-    let recovered = crate::auth::readiness(&manager, &health).await;
+    let recovered = crate::auth::readiness_with_auth(&manager, &health, Some(auth));
     assert!(recovered.ready);
     assert_eq!(recovered.reason, "ok");
+}
+
+#[tokio::test]
+async fn refresh_waiter_reloads_and_skips_refresh_after_another_process_updates_auth() {
+    let codex_home = std::env::temp_dir().join(format!(
+        "codex-wrapper-auth-recovery-lock-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&codex_home).unwrap();
+    save_api_key(&codex_home, "old-token");
+    let manager = file_manager(&codex_home).await;
+    let rejected = fingerprint(&manager.auth_cached().unwrap());
+    let recovery = CoordinatedRecovery::new(manager.clone(), codex_home.clone());
+
+    let held = crate::auth::acquire_auth_lock(&codex_home).await.unwrap();
+    let mut waiter = tokio::spawn(async move { recovery.refresh_if_unchanged(rejected).await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut waiter)
+            .await
+            .is_err(),
+        "the recovery did not wait for the auth lock"
+    );
+
+    save_api_key(&codex_home, "new-token");
+    drop(held);
+
+    assert!(
+        !waiter.await.unwrap().unwrap(),
+        "a second refresh was attempted"
+    );
+    assert_eq!(
+        manager.auth_cached().unwrap().get_token().unwrap(),
+        "new-token"
+    );
+    std::fs::remove_dir_all(codex_home).unwrap();
 }

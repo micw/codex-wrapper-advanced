@@ -91,10 +91,9 @@ impl AuthProvider for ManagedChatGptAuth {
 
     fn resolve_auth_headers(&self) -> AuthHeadersFuture<'_> {
         Box::pin(async move {
-            let auth = self
-                .manager
-                .auth()
+            let auth = crate::auth::coordinated_auth(&self.manager)
                 .await
+                .map_err(|error| AuthError::Build(error.to_string()))?
                 .ok_or_else(|| AuthError::Build("not signed in".to_string()))?;
             self.tracker.record(&auth);
             let mut headers = HeaderMap::new();
@@ -336,7 +335,7 @@ impl std::fmt::Display for UpstreamError {
 impl std::error::Error for UpstreamError {}
 
 impl UpstreamError {
-    fn local(message: impl Into<String>) -> Self {
+    pub(crate) fn local(message: impl Into<String>) -> Self {
         Self {
             status: None,
             message: message.into(),
@@ -529,10 +528,9 @@ impl Client {
     /// Reads the subscription usage and rate-limit snapshot.
     pub async fn usage(&self) -> Result<Value, UpstreamError> {
         run_with_unauthorized_recovery(&self.manager, &self.auth_health, |tracker| async move {
-            let auth = self
-                .manager
-                .auth()
+            let auth = crate::auth::coordinated_auth(&self.manager)
                 .await
+                .map_err(|error| UpstreamError::local(error.to_string()))?
                 .ok_or_else(|| UpstreamError::local("not signed in"))?;
             tracker.record(&auth);
             let mut headers = HeaderMap::new();

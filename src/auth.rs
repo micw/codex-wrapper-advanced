@@ -4,6 +4,10 @@
 //! written or parsed by hand and no token endpoint is reimplemented — that is
 //! exactly the line drawn in KONTEXT-HARNESS.md 8.1.
 
+use std::fs::File;
+use std::fs::OpenOptions;
+use std::io;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,6 +52,33 @@ pub fn home() -> Result<PathBuf> {
 /// directory leaves nothing behind in a keyring.
 const STORE_MODE: AuthCredentialsStoreMode = AuthCredentialsStoreMode::File;
 
+const AUTH_LOCK_FILE: &str = "auth.lock";
+
+/// Process-wide ownership of the credential store.
+///
+/// `AuthManager` serializes refreshes within one process, but a rolling update
+/// briefly has two managers. The file descriptor keeps the OS lock until this
+/// guard is dropped, including while an async refresh is in flight.
+pub(crate) struct AuthFileLock {
+    _file: File,
+}
+
+pub(crate) async fn acquire_auth_lock(codex_home: &Path) -> io::Result<AuthFileLock> {
+    let path = codex_home.join(AUTH_LOCK_FILE);
+    tokio::task::spawn_blocking(move || {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        file.lock()?;
+        Ok(AuthFileLock { _file: file })
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
 fn route_config() -> AuthRouteConfig {
     // `ReqwestDefault` keeps the standard behaviour (proxy from the
     // environment). The system/PAC resolution the real CLI can optionally do is
@@ -81,6 +112,9 @@ pub async fn login() -> Result<()> {
     let codex_home = home()?;
     std::fs::create_dir_all(&codex_home)
         .with_context(|| format!("creating CODEX_HOME: {}", codex_home.display()))?;
+    let _auth_lock = acquire_auth_lock(&codex_home)
+        .await
+        .context("locking CODEX_HOME")?;
 
     // Discard previous credentials, otherwise a stale refresh token gets mixed
     // into the new flow. Failure is not fatal here (e.g. nothing to delete).
@@ -133,6 +167,9 @@ pub async fn login_device(probe_only: bool) -> Result<()> {
         return Ok(());
     }
 
+    let _auth_lock = acquire_auth_lock(&codex_home)
+        .await
+        .context("locking CODEX_HOME")?;
     run_device_code_login(opts).await?;
     eprintln!("Login complete. Credentials in {}", codex_home.display());
     Ok(())
@@ -169,8 +206,26 @@ pub(crate) async fn login_reminder(
             tokio::time::sleep(BACKOFF).await;
             continue;
         };
-        let status = readiness(&manager, &health).await;
-        let opts = server_options(codex_home);
+        let opts = server_options(codex_home.clone());
+
+        let _auth_lock = match acquire_auth_lock(&codex_home).await {
+            Ok(lock) => lock,
+            Err(err) => {
+                eprintln!("Sign-in required, but CODEX_HOME could not be locked: {err}");
+                tokio::time::sleep(BACKOFF).await;
+                continue;
+            }
+        };
+
+        // A different pod may have completed sign-in while this one waited for
+        // the lock. Reload and re-check before requesting another device code;
+        // otherwise the waiter would hold the lock for up to 15 minutes and
+        // prevent the newly authenticated pod from resolving credentials.
+        manager.reload().await;
+        let status = readiness_with_auth(&manager, &health, manager.auth().await);
+        if status.ready {
+            continue;
+        }
 
         let code = match request_device_code(&opts).await {
             Ok(code) => code,
@@ -237,6 +292,11 @@ async fn remind(status: &crate::wire::ReadyStatus, url: &str, user_code: &str, i
 
 pub async fn logout() -> Result<()> {
     let codex_home = home()?;
+    std::fs::create_dir_all(&codex_home)
+        .with_context(|| format!("creating CODEX_HOME: {}", codex_home.display()))?;
+    let _auth_lock = acquire_auth_lock(&codex_home)
+        .await
+        .context("locking CODEX_HOME")?;
     logout_with_revoke(&codex_home, STORE_MODE, keyring_kind(), &route_config()).await?;
     eprintln!("Signed out, tokens revoked.");
     Ok(())
@@ -250,6 +310,8 @@ pub async fn logout() -> Result<()> {
 /// subscription backend.
 pub async fn auth_manager() -> Result<Arc<AuthManager>> {
     let codex_home = home()?;
+    std::fs::create_dir_all(&codex_home)
+        .with_context(|| format!("creating CODEX_HOME: {}", codex_home.display()))?;
     let manager = AuthManager::new(
         codex_home,
         /*enable_codex_api_key_env*/ false,
@@ -265,10 +327,27 @@ pub async fn auth_manager() -> Result<Arc<AuthManager>> {
 
 /// Fetches the current auth, refreshing an expired access token on the way.
 pub async fn current_auth(manager: &AuthManager) -> Result<CodexAuth> {
-    manager
-        .auth()
-        .await
+    coordinated_auth(manager)
+        .await?
         .context("not signed in — run `codex-api-wrapper login` first")
+}
+
+/// Reload under the process-shared lock before allowing `AuthManager` to decide
+/// whether a refresh is needed. A waiter therefore observes tokens persisted by
+/// the previous lock holder instead of consuming the old refresh token again.
+pub(crate) async fn coordinated_auth(manager: &AuthManager) -> Result<Option<CodexAuth>> {
+    coordinated_auth_at(manager, &home()?).await
+}
+
+async fn coordinated_auth_at(
+    manager: &AuthManager,
+    codex_home: &Path,
+) -> Result<Option<CodexAuth>> {
+    let _auth_lock = acquire_auth_lock(codex_home)
+        .await
+        .context("locking CODEX_HOME")?;
+    manager.reload().await;
+    Ok(manager.auth().await)
 }
 
 /// Operational readiness — the basis of the readiness probe.
@@ -295,7 +374,28 @@ pub(crate) async fn readiness(
         access_token_expires_in_seconds: secs,
     };
 
-    let Some(auth) = manager.auth().await else {
+    let auth = match coordinated_auth(manager).await {
+        Ok(auth) => auth,
+        Err(error) => {
+            return not_ready("auth_lock_failed", Some(error.to_string()), None);
+        }
+    };
+    readiness_with_auth(manager, health, auth)
+}
+
+pub(crate) fn readiness_with_auth(
+    manager: &AuthManager,
+    health: &AuthHealth,
+    auth: Option<CodexAuth>,
+) -> crate::wire::ReadyStatus {
+    let not_ready = |reason, detail, secs| crate::wire::ReadyStatus {
+        ready: false,
+        reason,
+        detail,
+        access_token_expires_in_seconds: secs,
+    };
+
+    let Some(auth) = auth else {
         return not_ready("not_authenticated", None, None);
     };
     if !auth.is_chatgpt_auth() {
@@ -332,7 +432,7 @@ pub(crate) async fn readiness(
 /// whoever reaches the endpoint should learn *whether* and *as whom* we are
 /// signed in, not with what.
 pub async fn status(manager: &AuthManager) -> Result<crate::wire::AuthStatus> {
-    let Some(auth) = manager.auth().await else {
+    let Some(auth) = coordinated_auth(manager).await? else {
         return Ok(crate::wire::AuthStatus {
             authenticated: false,
             account_id: None,
@@ -413,3 +513,7 @@ pub async fn whoami() -> Result<()> {
 fn opt(value: Option<String>) -> String {
     value.unwrap_or_else(|| "-".to_string())
 }
+
+#[cfg(test)]
+#[path = "auth_lock_tests.rs"]
+mod tests;
