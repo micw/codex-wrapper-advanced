@@ -50,6 +50,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Sse;
 use axum::response::sse::Event as SseEvent;
+use axum::response::sse::KeepAlive;
 use axum::routing::get;
 use axum::routing::post;
 use codex_login::AuthManager;
@@ -76,6 +77,17 @@ use crate::wire::StreamRequest;
 /// wrapper the hidden bottleneck for long conversations after nginx accepted
 /// them already.
 const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
+
+/// Keep reverse proxies and clients from mistaking a long upstream thinking
+/// pause for a dead SSE connection. Comments are invisible to SSE consumers and
+/// Axum only emits one after the stream itself has been quiet for this interval.
+const SSE_KEEP_ALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+fn sse_keep_alive() -> KeepAlive {
+    KeepAlive::new()
+        .interval(SSE_KEEP_ALIVE_INTERVAL)
+        .text("keep-alive")
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -420,7 +432,7 @@ async fn responses(
         Ok::<_, std::convert::Infallible>(SseEvent::default().data(payload))
     });
 
-    Sse::new(sse).into_response()
+    Sse::new(sse).keep_alive(sse_keep_alive()).into_response()
 }
 
 /// `POST /v1/chat/completions` — OpenAI shape, with streaming and non-streaming
@@ -507,7 +519,7 @@ async fn openai_chat_completions(
         )
     });
 
-    Sse::new(sse).into_response()
+    Sse::new(sse).keep_alive(sse_keep_alive()).into_response()
 }
 
 /// `POST /v1/responses` — the OpenAI Responses API, streaming and
@@ -593,7 +605,7 @@ async fn openai_responses(
         }))
     });
 
-    Sse::new(sse).into_response()
+    Sse::new(sse).keep_alive(sse_keep_alive()).into_response()
 }
 
 fn upstream_chat_error(message: &str, retryable: bool) -> axum::response::Response {
