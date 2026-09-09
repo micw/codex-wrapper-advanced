@@ -59,6 +59,13 @@ struct Inner {
     tokens: Tokens,
     total_ms: VecDeque<f64>,
     ttft_ms: VecDeque<f64>,
+    upstream_connect_ms: VecDeque<f64>,
+    first_event_ms: VecDeque<f64>,
+    max_event_gap_ms: VecDeque<f64>,
+    request_decode_ms: VecDeque<f64>,
+    request_encoded_bytes: u64,
+    request_decoded_bytes: u64,
+    compressed_requests: u64,
     /// The most recent turn's quota, resolved.
     ///
     /// One object, not a list: since 1.3.0 the daemon builds a single event per
@@ -115,6 +122,11 @@ impl Metrics {
             model: model.to_string(),
             start: Instant::now(),
             ttft_ms: None,
+            upstream_connect_ms: None,
+            first_event_ms: None,
+            last_event_at: None,
+            max_event_gap_ms: 0.0,
+            request: None,
             usage: None,
             outcome: None,
         }
@@ -147,6 +159,27 @@ impl Metrics {
         push(&mut inner.total_ms, total_ms, window);
         if let Some(ttft) = turn.ttft_ms {
             push(&mut inner.ttft_ms, ttft, window);
+        }
+        if let Some(connect) = turn.upstream_connect_ms {
+            push(&mut inner.upstream_connect_ms, connect, window);
+        }
+        if let Some(first_event) = turn.first_event_ms {
+            push(&mut inner.first_event_ms, first_event, window);
+        }
+        let tail_gap_ms = turn
+            .last_event_at
+            .map(|last| last.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        push(
+            &mut inner.max_event_gap_ms,
+            turn.max_event_gap_ms.max(tail_gap_ms),
+            window,
+        );
+        if let Some(request) = &turn.request {
+            inner.request_encoded_bytes += request.encoded_bytes as u64;
+            inner.request_decoded_bytes += request.decoded_bytes as u64;
+            inner.compressed_requests += u64::from(request.compressed);
+            push(&mut inner.request_decode_ms, request.decode_ms, window);
         }
         if let Some(usage) = &turn.usage {
             let t = &mut inner.tokens;
@@ -222,6 +255,19 @@ impl Metrics {
             "latency_ms": {
                 "total": band(&inner.total_ms),
                 "ttft": band(&inner.ttft_ms),
+                "upstream_connect": band(&inner.upstream_connect_ms),
+                "first_event": band(&inner.first_event_ms),
+                "max_event_gap": band(&inner.max_event_gap_ms),
+                "request_decode": band(&inner.request_decode_ms),
+            },
+            "request_body": {
+                "encoded_bytes": inner.request_encoded_bytes,
+                "decoded_bytes": inner.request_decoded_bytes,
+                "compression_ratio": ratio(
+                    inner.request_encoded_bytes as i64,
+                    inner.request_decoded_bytes as i64,
+                ),
+                "compressed_requests": inner.compressed_requests,
             },
             "models": models,
             "limits": inner.limits,
@@ -252,13 +298,56 @@ pub struct TurnRecorder {
     model: String,
     start: Instant,
     ttft_ms: Option<f64>,
+    upstream_connect_ms: Option<f64>,
+    first_event_ms: Option<f64>,
+    last_event_at: Option<Instant>,
+    max_event_gap_ms: f64,
+    request: Option<RequestObservation>,
     usage: Option<Usage>,
     outcome: Option<String>,
 }
 
+struct RequestObservation {
+    encoded_bytes: usize,
+    decoded_bytes: usize,
+    decode_ms: f64,
+    compressed: bool,
+}
+
 impl TurnRecorder {
+    pub fn record_request(
+        &mut self,
+        encoded_bytes: usize,
+        decoded_bytes: usize,
+        decode_ms: f64,
+        compressed: bool,
+    ) {
+        self.request = Some(RequestObservation {
+            encoded_bytes,
+            decoded_bytes,
+            decode_ms,
+            compressed,
+        });
+    }
+
+    pub fn record_upstream_connect(&mut self, elapsed_ms: f64) {
+        self.upstream_connect_ms = Some(elapsed_ms);
+    }
+
     /// Watches the event stream on its way to the consumer.
     pub fn observe(&mut self, event: &Event) {
+        if !matches!(event, Event::RateLimits(_)) {
+            let now = Instant::now();
+            if self.first_event_ms.is_none() {
+                self.first_event_ms = Some(self.start.elapsed().as_secs_f64() * 1000.0);
+            }
+            if let Some(last) = self.last_event_at {
+                self.max_event_gap_ms = self
+                    .max_event_gap_ms
+                    .max(now.duration_since(last).as_secs_f64() * 1000.0);
+            }
+            self.last_event_at = Some(now);
+        }
         match event {
             // Time to first token counts the first thing a user sees — text,
             // thinking, or a tool call for turns that produce no text at all.
@@ -308,6 +397,24 @@ impl TurnRecorder {
             Some(ms) => format!("{ms:.0}ms"),
             None => "-".to_string(),
         };
+        let connect = self
+            .upstream_connect_ms
+            .map(|ms| format!("{ms:.0}ms"))
+            .unwrap_or_else(|| "-".to_string());
+        let first_event = self
+            .first_event_ms
+            .map(|ms| format!("{ms:.0}ms"))
+            .unwrap_or_else(|| "-".to_string());
+        let tail_gap_ms = self
+            .last_event_at
+            .map(|last| last.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let max_gap = self.max_event_gap_ms.max(tail_gap_ms);
+        let request = self
+            .request
+            .as_ref()
+            .map(|request| format!("{}/{}", request.encoded_bytes, request.decoded_bytes))
+            .unwrap_or_else(|| "-".to_string());
         let (input, cached, output, hit) = match &self.usage {
             Some(usage) => {
                 let input = usage.input_tokens.unwrap_or(0);
@@ -326,13 +433,17 @@ impl TurnRecorder {
             None => (0, 0, 0, "-".to_string()),
         };
         format!(
-            "[{}] {} model={} outcome={} total={:.0}ms ttft={} in={} out={} cached={}/{} ({})",
+            "[{}] {} model={} outcome={} total={:.0}ms connect={} first={} ttft={} gap={:.0}ms req={} in={} out={} cached={}/{} ({})",
             self.caller,
             self.surface,
             self.model,
             outcome,
             total_ms,
+            connect,
+            first_event,
             ttft,
+            max_gap,
+            request,
             input,
             output,
             cached,
@@ -448,6 +559,30 @@ mod tests {
         assert_eq!(snap["surfaces"][SURFACE_CHAT], 1);
         assert_eq!(snap["models"]["gpt-5.6-sol"]["requests"], 1);
         assert_eq!(snap["latency_ms"]["ttft"]["n"], 1);
+    }
+
+    #[test]
+    fn transport_and_request_observations_are_reported() {
+        let metrics = Arc::new(Metrics::new());
+        {
+            let mut turn = metrics.start_turn(SURFACE_WIRE, "local", "gpt-5.6-sol");
+            turn.record_request(25, 100, 1.5, true);
+            turn.record_upstream_connect(42.0);
+            turn.observe(&Event::Started { model: None });
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            turn.observe(&done(10, 0, 1));
+        }
+
+        let snap = metrics.snapshot();
+        assert_eq!(snap["request_body"]["encoded_bytes"], 25);
+        assert_eq!(snap["request_body"]["decoded_bytes"], 100);
+        assert_eq!(snap["request_body"]["compression_ratio"], 0.25);
+        assert_eq!(snap["request_body"]["compressed_requests"], 1);
+        assert_eq!(snap["latency_ms"]["request_decode"]["n"], 1);
+        assert_eq!(snap["latency_ms"]["upstream_connect"]["n"], 1);
+        assert_eq!(snap["latency_ms"]["first_event"]["n"], 1);
+        assert_eq!(snap["latency_ms"]["max_event_gap"]["n"], 1);
+        assert!(snap["latency_ms"]["max_event_gap"]["p50"].as_f64().unwrap() >= 1.0);
     }
 
     /// The mark is set by the **first** content event and never moved. With the

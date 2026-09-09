@@ -51,6 +51,7 @@ use crate::wire::Usage;
 
 /// Base URL of the subscription backend. `ResponsesClient` appends `responses`.
 const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(900);
 
 // --- Auth provider ---------------------------------------------------------
 
@@ -129,7 +130,7 @@ fn provider() -> Provider {
             retry_5xx: false,
             retry_transport: false,
         },
-        stream_idle_timeout: Duration::from_secs(300),
+        stream_idle_timeout: STREAM_IDLE_TIMEOUT,
     }
 }
 
@@ -413,6 +414,7 @@ impl From<codex_api::ApiError> for UpstreamError {
 pub struct Client {
     manager: Arc<AuthManager>,
     auth_health: Arc<AuthHealth>,
+    transport: ReqwestTransport,
 }
 
 impl Client {
@@ -420,6 +422,7 @@ impl Client {
         Self {
             manager,
             auth_health: Arc::new(AuthHealth::default()),
+            transport: transport(),
         }
     }
 
@@ -430,6 +433,7 @@ impl Client {
         Self {
             manager,
             auth_health,
+            transport: transport(),
         }
     }
 
@@ -454,6 +458,7 @@ impl Client {
             None,
         ));
 
+        let transport = self.transport.clone();
         let (upstream, quota) =
             run_with_unauthorized_recovery(&self.manager, &self.auth_health, |tracker| {
                 let auth: SharedAuthProvider = Arc::new(ManagedChatGptAuth {
@@ -463,7 +468,7 @@ impl Client {
                 let seen = Arc::new(Mutex::new(None));
                 let client = ResponsesClient::new(
                     HeaderTap {
-                        inner: transport(),
+                        inner: transport.clone(),
                         seen: seen.clone(),
                     },
                     provider(),
@@ -473,7 +478,7 @@ impl Client {
                 let headers = headers.clone();
                 async move {
                     let upstream = client
-                        .stream(body, headers, Compression::None, /*turn_state*/ None)
+                        .stream(body, headers, Compression::Zstd, /*turn_state*/ None)
                         .await
                         .map_err(UpstreamError::from)?;
 
@@ -497,13 +502,14 @@ impl Client {
 
     /// The subscription's model list.
     pub async fn models(&self, client_version: &str) -> Result<Vec<Value>, UpstreamError> {
+        let transport = self.transport.clone();
         let models = run_with_unauthorized_recovery(&self.manager, &self.auth_health, |tracker| {
             let provider = provider();
             let auth: SharedAuthProvider = Arc::new(ManagedChatGptAuth {
                 manager: self.manager.clone(),
                 tracker,
             });
-            let client = codex_api::ModelsClient::new(transport(), provider.clone(), auth);
+            let client = codex_api::ModelsClient::new(transport.clone(), provider.clone(), auth);
             let url =
                 codex_api::ModelsClient::<ReqwestTransport>::request_url(&provider, client_version);
             async move {

@@ -124,6 +124,10 @@ codex-api-wrapper serve --listen 0.0.0.0:8080 --api-keys keys.txt   # Netz
 JSON-Request-Bodies sind auf **32 MiB** begrenzt. Das hebt Axums sonst
 greifendes 2-MiB-Default auf und entspricht `client_max_body_size 32m` im
 vorgeschalteten nginx. Wer den Proxy-Wert ändert, muss diese Grenze mitprüfen.
+Clients dürfen Bodies mit `Content-Encoding: zstd` senden; die 32-MiB-Grenze
+gilt zusätzlich nach dem Dekomprimieren. Der Wrapper sendet die großen
+Responses-Requests seinerseits Zstd-komprimiert zum Backend und nutzt dafür
+einen gemeinsamen HTTP-Connection-Pool.
 
 ### Pfade — ein Präfix, eine Entscheidung
 
@@ -542,7 +546,15 @@ Lesart — die Zahlen beschreiben den laufenden Prozess, nicht das Konto.
   "error_rate": 0.0238,
   "cache":   { "hit_rate": 0.978, "read_tokens": 7936, "write_tokens": 0, "input_tokens": 8115 },
   "tokens":  { "input": 8115, "output": 113, "reasoning": 93, "total": 8228 },
-  "latency_ms": { "total": { "p50": 2473.2, "p95": …, "p99": …, "n": 2 }, "ttft": { … } },
+  "latency_ms": {
+    "total": { "p50": 2473.2, "p95": …, "p99": …, "n": 2 },
+    "ttft": { … }, "upstream_connect": { … }, "first_event": { … },
+    "max_event_gap": { … }, "request_decode": { … }
+  },
+  "request_body": {
+    "encoded_bytes": 2048, "decoded_bytes": 8192,
+    "compression_ratio": 0.25, "compressed_requests": 2
+  },
   "surfaces": { "chat_completions": 40, "responses": 2 },
   "models":  { "gpt-5.6-sol": { "requests": 42, "input_tokens": …, "hit_rate": 0.978 } },
   "rate_limits": [ … ]
@@ -575,7 +587,7 @@ auflegen ist kein Fehler dieses Dienstes.
 Dazu geht pro Turn eine Zeile ins Log:
 
 ```
-[local] chat_completions model=gpt-5.6-sol outcome=end_turn total=2399ms ttft=2060ms in=8069 out=31 cached=0/8069 (0.0%)
+[local] chat_completions model=gpt-5.6-sol outcome=end_turn total=2399ms connect=812ms first=3ms ttft=2060ms gap=2057ms req=2048/8192 in=8069 out=31 cached=0/8069 (0.0%)
 ```
 
 Der Endpunkt braucht **keinen Schlüssel**, aus demselben Grund wie `/health` und

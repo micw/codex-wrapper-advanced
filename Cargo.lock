@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "codex-api-wrapper"
-version = "1.7.1"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1019,6 +1019,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

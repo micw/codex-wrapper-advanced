@@ -36,15 +36,16 @@
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Context as _;
 use anyhow::Result;
 use axum::Json;
 use axum::Router;
+use axum::body::Bytes;
 use axum::extract::DefaultBodyLimit;
 use axum::extract::Query;
 use axum::extract::State;
-use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -67,6 +68,8 @@ use crate::metrics::Metrics;
 use crate::metrics::SURFACE_CHAT;
 use crate::metrics::SURFACE_RESPONSES;
 use crate::metrics::SURFACE_WIRE;
+use crate::request_body::DecodedJson;
+use crate::request_body::decode_json;
 use crate::wire::ServerInfo;
 use crate::wire::ServiceInfo;
 use crate::wire::StreamRequest;
@@ -87,6 +90,20 @@ fn sse_keep_alive() -> KeepAlive {
     KeepAlive::new()
         .interval(SSE_KEEP_ALIVE_INTERVAL)
         .text("keep-alive")
+}
+
+fn request_json<T: serde::de::DeserializeOwned>(
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Result<DecodedJson<T>, Box<axum::response::Response>> {
+    decode_json(headers, body, MAX_REQUEST_BODY_BYTES).map_err(|err| {
+        Box::new(error(
+            err.status,
+            &err.message,
+            "invalid_request_error",
+            Some("invalid_request_body"),
+        ))
+    })
 }
 
 #[derive(Clone)]
@@ -405,13 +422,25 @@ async fn openai_models(
 async fn responses(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<StreamRequest>,
+    body: Bytes,
 ) -> axum::response::Response {
     let Some(caller) = state.keys.authenticate(&headers) else {
         return unauthorized();
     };
+    let decoded = match request_json::<StreamRequest>(&headers, body) {
+        Ok(decoded) => decoded,
+        Err(response) => return *response,
+    };
+    let DecodedJson {
+        value: request,
+        encoded_bytes,
+        decoded_bytes,
+        decode_ms,
+        compressed,
+    } = decoded;
 
     let model = request.model.clone();
+    let connect_started = Instant::now();
     let stream = match state.client.stream(request).await {
         Ok(stream) => stream,
         // Errors *before* the first event come back as an HTTP status, not as an
@@ -425,6 +454,8 @@ async fn responses(
     };
 
     let mut recorder = state.metrics.start_turn(SURFACE_WIRE, &caller, &model);
+    recorder.record_request(encoded_bytes, decoded_bytes, decode_ms, compressed);
+    recorder.record_upstream_connect(connect_started.elapsed().as_secs_f64() * 1000.0);
     let sse = stream.map(move |event| {
         recorder.observe(&event);
         let payload = serde_json::to_string(&event)
@@ -442,22 +473,22 @@ async fn responses(
 async fn openai_chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    request: Result<Json<crate::openai_chat::ChatRequest>, JsonRejection>,
+    body: Bytes,
 ) -> axum::response::Response {
     let Some(caller) = state.keys.authenticate(&headers) else {
         return unauthorized();
     };
-    let request = match request {
-        Ok(Json(request)) => request,
-        Err(rejection) => {
-            return error(
-                StatusCode::BAD_REQUEST,
-                &rejection.body_text(),
-                "invalid_request_error",
-                None,
-            );
-        }
+    let decoded = match request_json::<crate::openai_chat::ChatRequest>(&headers, body) {
+        Ok(decoded) => decoded,
+        Err(response) => return *response,
     };
+    let DecodedJson {
+        value: request,
+        encoded_bytes,
+        decoded_bytes,
+        decode_ms,
+        compressed,
+    } = decoded;
 
     let include_usage = request
         .stream_options
@@ -477,6 +508,7 @@ async fn openai_chat_completions(
         }
     };
 
+    let connect_started = Instant::now();
     let stream = match state.client.stream(wire).await {
         Ok(stream) => stream,
         Err(err) => {
@@ -491,6 +523,8 @@ async fn openai_chat_completions(
     let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
     let model = request.model;
     let mut recorder = state.metrics.start_turn(SURFACE_CHAT, &caller, &model);
+    recorder.record_request(encoded_bytes, decoded_bytes, decode_ms, compressed);
+    recorder.record_upstream_connect(connect_started.elapsed().as_secs_f64() * 1000.0);
 
     if !streaming {
         let mut state = crate::openai_chat::ChatResponseState::default();
@@ -536,22 +570,22 @@ async fn openai_chat_completions(
 async fn openai_responses(
     State(state): State<AppState>,
     headers: HeaderMap,
-    request: Result<Json<crate::openai_responses::ResponsesRequest>, JsonRejection>,
+    body: Bytes,
 ) -> axum::response::Response {
     let Some(caller) = state.keys.authenticate(&headers) else {
         return unauthorized();
     };
-    let request = match request {
-        Ok(Json(request)) => request,
-        Err(rejection) => {
-            return error(
-                StatusCode::BAD_REQUEST,
-                &rejection.body_text(),
-                "invalid_request_error",
-                None,
-            );
-        }
+    let decoded = match request_json::<crate::openai_responses::ResponsesRequest>(&headers, body) {
+        Ok(decoded) => decoded,
+        Err(response) => return *response,
     };
+    let DecodedJson {
+        value: request,
+        encoded_bytes,
+        decoded_bytes,
+        decode_ms,
+        compressed,
+    } = decoded;
 
     let streaming = request.stream.unwrap_or(false);
 
@@ -567,6 +601,7 @@ async fn openai_responses(
         }
     };
 
+    let connect_started = Instant::now();
     let stream = match state.client.stream(wire).await {
         Ok(stream) => stream,
         Err(err) => {
@@ -580,6 +615,8 @@ async fn openai_responses(
     let mut recorder = state
         .metrics
         .start_turn(SURFACE_RESPONSES, &caller, &request.model);
+    recorder.record_request(encoded_bytes, decoded_bytes, decode_ms, compressed);
+    recorder.record_upstream_connect(connect_started.elapsed().as_secs_f64() * 1000.0);
     let mut accumulator = crate::openai_responses::ResponsesState::new(id, &request);
 
     if !streaming {

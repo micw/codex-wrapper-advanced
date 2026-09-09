@@ -38,6 +38,7 @@ pub mod metrics;
 pub mod models;
 pub mod openai_chat;
 pub mod openai_responses;
+mod request_body;
 pub mod serve;
 pub mod wire;
 
