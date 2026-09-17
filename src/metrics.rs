@@ -356,7 +356,7 @@ impl Metrics {
             "# TYPE subscription_wrapper_requests_total counter".to_string(),
         ];
         let mut outcomes: Vec<_> = inner.outcomes.iter().collect();
-        outcomes.sort_by(|(left, _), (right, _)| left.cmp(right));
+        outcomes.sort_by_key(|(outcome, _)| *outcome);
         for (outcome, count) in outcomes {
             lines.push(sample(
                 "subscription_wrapper_requests_total",
@@ -369,7 +369,7 @@ impl Metrics {
             "# TYPE subscription_wrapper_tokens_total counter".to_string(),
         ]);
         let mut models: Vec<_> = inner.models.iter().collect();
-        models.sort_by(|(left, _), (right, _)| left.cmp(right));
+        models.sort_by_key(|(model, _)| *model);
         for (model, stats) in models {
             let uncached = (stats.input - stats.cached - stats.cache_write).max(0);
             for (kind, value) in [
@@ -397,7 +397,7 @@ impl Metrics {
             "# TYPE subscription_wrapper_credit_observations_total counter".to_string(),
         ]);
         let mut models: Vec<_> = inner.models.iter().collect();
-        models.sort_by(|(left, _), (right, _)| left.cmp(right));
+        models.sort_by_key(|(model, _)| *model);
         for (model, stats) in models {
             if stats.credit_observations == 0 {
                 continue;
@@ -678,7 +678,10 @@ fn sample<T: std::fmt::Display>(name: &str, value: T, labels: &[(&str, &str)]) -
 }
 
 fn escape_label(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('\n', "\\n").replace('"', "\\\"")
+    value
+        .replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('"', "\\\"")
 }
 
 fn ratio(part: i64, whole: i64) -> Value {
@@ -798,10 +801,7 @@ mod tests {
         assert_eq!(snap["credits"]["total"], 24.125);
         assert_eq!(snap["credits"]["observations"], 1);
         assert_eq!(snap["models"]["gpt-5.6-sol"]["credits"], 24.125);
-        assert_eq!(
-            snap["models"]["gpt-5.6-sol"]["credit_observations"],
-            1
-        );
+        assert_eq!(snap["models"]["gpt-5.6-sol"]["credit_observations"], 1);
 
         let text = metrics.prometheus();
         assert!(text.contains(

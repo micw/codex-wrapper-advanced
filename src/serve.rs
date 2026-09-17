@@ -317,7 +317,10 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
 /// Prometheus text exposition of the counters and quota observations used for analysis.
 async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse {
     (
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         state.metrics.prometheus(),
     )
 }
