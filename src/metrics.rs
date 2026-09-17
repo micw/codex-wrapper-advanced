@@ -25,6 +25,7 @@ use std::time::Instant;
 use serde_json::Value;
 use serde_json::json;
 
+use crate::limits::Group;
 use crate::limits::TurnLimits;
 use crate::wire::Event;
 use crate::wire::Usage;
@@ -56,6 +57,8 @@ struct Inner {
     rejections: HashMap<u16, u64>,
     surfaces: HashMap<String, u64>,
     models: HashMap<String, ModelStats>,
+    quota_groups: HashMap<String, ObservedQuota>,
+    plan: Option<String>,
     tokens: Tokens,
     total_ms: VecDeque<f64>,
     ttft_ms: VecDeque<f64>,
@@ -90,6 +93,14 @@ struct ModelStats {
     requests: u64,
     input: i64,
     cached: i64,
+    cache_write: i64,
+    output: i64,
+    reasoning: i64,
+}
+
+struct ObservedQuota {
+    group: Group,
+    observed_at: i64,
 }
 
 impl Metrics {
@@ -146,8 +157,21 @@ impl Metrics {
 
     fn update_limits(&self, limits: TurnLimits) {
         let mut inner = self.lock();
+        let observed_at = chrono::Utc::now().timestamp();
+        if let Some(plan) = &limits.account.plan {
+            inner.plan = Some(plan.id.clone());
+        }
+        for group in &limits.limits.groups {
+            inner.quota_groups.insert(
+                group.id.clone(),
+                ObservedQuota {
+                    group: group.clone(),
+                    observed_at,
+                },
+            );
+        }
         inner.limits = Some(limits);
-        inner.limits_updated_at = Some(chrono::Utc::now().timestamp());
+        inner.limits_updated_at = Some(observed_at);
     }
 
     fn finish_turn(&self, turn: &TurnRecorder, outcome: &str) -> String {
@@ -181,6 +205,8 @@ impl Metrics {
             inner.compressed_requests += u64::from(request.compressed);
             push(&mut inner.request_decode_ms, request.decode_ms, window);
         }
+        let model = inner.models.entry(turn.model.clone()).or_default();
+        model.requests += 1;
         if let Some(usage) = &turn.usage {
             let t = &mut inner.tokens;
             t.input += usage.input_tokens.unwrap_or(0);
@@ -191,9 +217,11 @@ impl Metrics {
             t.total += usage.total_tokens.unwrap_or(0);
 
             let model = inner.models.entry(turn.model.clone()).or_default();
-            model.requests += 1;
             model.input += usage.input_tokens.unwrap_or(0);
             model.cached += usage.cached_input_tokens.unwrap_or(0);
+            model.cache_write += usage.cache_write_input_tokens.unwrap_or(0);
+            model.output += usage.output_tokens.unwrap_or(0);
+            model.reasoning += usage.reasoning_output_tokens.unwrap_or(0);
         }
         drop(inner);
         turn.log_line(outcome, total_ms)
@@ -218,6 +246,9 @@ impl Metrics {
                         "requests": stats.requests,
                         "input_tokens": stats.input,
                         "cached_tokens": stats.cached,
+                        "cache_write_tokens": stats.cache_write,
+                        "output_tokens": stats.output,
+                        "reasoning_tokens": stats.reasoning,
                         "hit_rate": ratio(stats.cached, stats.input),
                     }),
                 )
@@ -273,6 +304,127 @@ impl Metrics {
             "limits": inner.limits,
             "limits_updated_at": inner.limits_updated_at,
         })
+    }
+
+    /// Prometheus text format for durable scraping by an external time-series database.
+    pub fn prometheus(&self) -> String {
+        let inner = self.lock();
+        let mut lines = vec![
+            "# HELP subscription_wrapper_info Static wrapper identity.".to_string(),
+            "# TYPE subscription_wrapper_info gauge".to_string(),
+            sample(
+                "subscription_wrapper_info",
+                1,
+                &[
+                    ("provider", "codex"),
+                    ("plan", inner.plan.as_deref().unwrap_or("unknown")),
+                ],
+            ),
+            "# HELP subscription_wrapper_uptime_seconds Process uptime.".to_string(),
+            "# TYPE subscription_wrapper_uptime_seconds gauge".to_string(),
+            sample(
+                "subscription_wrapper_uptime_seconds",
+                self.started.elapsed().as_secs_f64(),
+                &[("provider", "codex")],
+            ),
+            "# HELP subscription_wrapper_inflight_requests Requests currently running.".to_string(),
+            "# TYPE subscription_wrapper_inflight_requests gauge".to_string(),
+            sample(
+                "subscription_wrapper_inflight_requests",
+                inner.inflight,
+                &[("provider", "codex")],
+            ),
+            "# HELP subscription_wrapper_requests_total Requests by terminal outcome.".to_string(),
+            "# TYPE subscription_wrapper_requests_total counter".to_string(),
+        ];
+        let mut outcomes: Vec<_> = inner.outcomes.iter().collect();
+        outcomes.sort_by(|(left, _), (right, _)| left.cmp(right));
+        for (outcome, count) in outcomes {
+            lines.push(sample(
+                "subscription_wrapper_requests_total",
+                count,
+                &[("provider", "codex"), ("outcome", outcome.as_str())],
+            ));
+        }
+        lines.extend([
+            "# HELP subscription_wrapper_tokens_total Provider-reported tokens by model and category.".to_string(),
+            "# TYPE subscription_wrapper_tokens_total counter".to_string(),
+        ]);
+        let mut models: Vec<_> = inner.models.iter().collect();
+        models.sort_by(|(left, _), (right, _)| left.cmp(right));
+        for (model, stats) in models {
+            let uncached = (stats.input - stats.cached - stats.cache_write).max(0);
+            for (kind, value) in [
+                ("input_uncached", uncached),
+                ("cache_read", stats.cached),
+                ("cache_write", stats.cache_write),
+                ("output", stats.output),
+                ("reasoning", stats.reasoning),
+            ] {
+                lines.push(sample(
+                    "subscription_wrapper_tokens_total",
+                    value,
+                    &[
+                        ("provider", "codex"),
+                        ("model", model.as_str()),
+                        ("type", kind),
+                    ],
+                ));
+            }
+        }
+        lines.extend([
+            "# HELP subscription_wrapper_quota_used_ratio Used fraction of a subscription quota window.".to_string(),
+            "# TYPE subscription_wrapper_quota_used_ratio gauge".to_string(),
+            "# HELP subscription_wrapper_quota_window_seconds Configured quota window length.".to_string(),
+            "# TYPE subscription_wrapper_quota_window_seconds gauge".to_string(),
+            "# HELP subscription_wrapper_quota_reset_timestamp_seconds Quota window reset time.".to_string(),
+            "# TYPE subscription_wrapper_quota_reset_timestamp_seconds gauge".to_string(),
+            "# HELP subscription_wrapper_quota_observed_timestamp_seconds Last backend observation time.".to_string(),
+            "# TYPE subscription_wrapper_quota_observed_timestamp_seconds gauge".to_string(),
+        ]);
+        let mut groups: Vec<_> = inner.quota_groups.values().collect();
+        groups.sort_by(|left, right| left.group.id.cmp(&right.group.id));
+        for observed in groups {
+            for (window_name, window) in [
+                ("primary", observed.group.primary.as_ref()),
+                ("secondary", observed.group.secondary.as_ref()),
+            ] {
+                let Some(window) = window else {
+                    continue;
+                };
+                let labels = [
+                    ("provider", "codex"),
+                    ("group", observed.group.id.as_str()),
+                    ("window", window_name),
+                ];
+                lines.push(sample(
+                    "subscription_wrapper_quota_used_ratio",
+                    window.used_percent / 100.0,
+                    &labels,
+                ));
+                if let Some(duration) = window.window_seconds {
+                    lines.push(sample(
+                        "subscription_wrapper_quota_window_seconds",
+                        duration,
+                        &labels,
+                    ));
+                }
+                if let Some(reset) = window.resets_at {
+                    lines.push(sample(
+                        "subscription_wrapper_quota_reset_timestamp_seconds",
+                        reset,
+                        &labels,
+                    ));
+                }
+                lines.push(sample(
+                    "subscription_wrapper_quota_observed_timestamp_seconds",
+                    observed.observed_at,
+                    &labels,
+                ));
+            }
+        }
+        lines.push(String::new());
+        lines.join("\n")
     }
 
     /// A poisoned lock must not take the server down: metrics are diagnostics,
@@ -462,6 +614,19 @@ fn push(buffer: &mut VecDeque<f64>, value: f64, window: usize) {
     buffer.push_back(value);
 }
 
+fn sample<T: std::fmt::Display>(name: &str, value: T, labels: &[(&str, &str)]) -> String {
+    let labels = labels
+        .iter()
+        .map(|(key, value)| format!(r#"{key}="{}""#, escape_label(value)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{name}{{{labels}}} {value}")
+}
+
+fn escape_label(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\n', "\\n").replace('"', "\\\"")
+}
+
 fn ratio(part: i64, whole: i64) -> Value {
     if whole <= 0 {
         return json!(0.0);
@@ -559,6 +724,36 @@ mod tests {
         assert_eq!(snap["surfaces"][SURFACE_CHAT], 1);
         assert_eq!(snap["models"]["gpt-5.6-sol"]["requests"], 1);
         assert_eq!(snap["latency_ms"]["ttft"]["n"], 1);
+    }
+
+    #[test]
+    fn prometheus_splits_tokens_and_keeps_observed_quota_groups() {
+        let metrics = Arc::new(Metrics::new());
+        {
+            let mut turn = metrics.start_turn(SURFACE_WIRE, "local", "model\"quoted");
+            let mut quota = limits("prolite", "global");
+            quota.limits.groups[0].primary = Some(crate::limits::Window {
+                used_percent: 12.0,
+                window_seconds: Some(604_800),
+                resets_at: Some(1234),
+                resets_in_seconds: Some(100),
+            });
+            turn.observe(&Event::RateLimits(quota));
+            turn.observe(&done(1000, 800, 20));
+        }
+
+        let text = metrics.prometheus();
+        assert!(text.contains(
+            r#"subscription_wrapper_tokens_total{provider="codex",model="model\"quoted",type="input_uncached"} 200"#
+        ));
+        assert!(text.contains(
+            r#"subscription_wrapper_tokens_total{provider="codex",model="model\"quoted",type="cache_read"} 800"#
+        ));
+        assert!(text.contains(
+            r#"subscription_wrapper_quota_used_ratio{provider="codex",group="global",window="primary"} 0.12"#
+        ));
+        assert!(text.contains("subscription_wrapper_quota_window_seconds"));
+        assert!(text.contains("subscription_wrapper_quota_reset_timestamp_seconds"));
     }
 
     #[test]

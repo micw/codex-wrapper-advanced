@@ -15,7 +15,7 @@
 //! |---|---|---|
 //! | `/v1/*` | OpenAI-compatible (`models`, `chat/completions`, `responses`) | yes |
 //! | `/wire/v1/*` | our own vocabulary (`wire::Event`) | yes |
-//! | `/health`, `/ready`, `/metrics` | operations, probes | **no** |
+//! | `/health`, `/ready`, `/metrics`, `/metrics/prometheus` | operations, probes | **no** |
 //!
 //! `/v1` deliberately sits at the root rather than under `/api/openai/v1`: some
 //! clients take a host and append `/v1/chat/completions` themselves. `/wire/v1`
@@ -24,7 +24,7 @@
 //! ```nginx
 //! location /v1/      { proxy_pass http://127.0.0.1:8080; }
 //! location /wire/v1/ { proxy_pass http://127.0.0.1:8080; }
-//! location /         { return 404; }   # /health, /ready, /metrics stay inside
+//! location /         { return 404; }   # probes and metrics stay inside
 //! ```
 //!
 //! # Access control
@@ -175,6 +175,7 @@ pub async fn run(config: ServeConfig) -> Result<()> {
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/metrics", get(metrics))
+        .route("/metrics/prometheus", get(prometheus_metrics))
         .nest("/wire/v1", wire_api)
         .nest("/v1", openai_api)
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
@@ -311,6 +312,14 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
 /// the last quota reading.
 async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     Json(state.metrics.snapshot())
+}
+
+/// Prometheus text exposition of the counters and quota observations used for analysis.
+async fn prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        state.metrics.prometheus(),
+    )
 }
 
 /// `GET /wire/v1/whoami` — who we are signed in as, straight from the token.

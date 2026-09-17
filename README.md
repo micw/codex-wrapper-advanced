@@ -539,6 +539,14 @@ einen Menschen für Missbrauchserkennung, keine Unterhaltung.
 nichts wird gespeichert: ein Neustart fängt bei null an, und das ist die ehrliche
 Lesart — die Zahlen beschreiben den laufenden Prozess, nicht das Konto.
 
+`GET /metrics/prometheus` liefert zusätzlich Prometheus-Text für VictoriaMetrics.
+Token-Counter sind nach kanonischem Modell und `input_uncached`, `cache_read`,
+`cache_write`, `output` und `reasoning` getrennt. Kontingent-Gauges tragen Gruppe,
+Primär-/Sekundärfenster, Fensterlänge, Reset und Beobachtungszeitpunkt. Anders als
+der JSON-Snapshot behält diese Projektion den letzten Stand jeder gesehenen Gruppe,
+damit ein Spark-Turn nicht den zuletzt bekannten globalen Stand aus der Zeitreihe
+entfernt. Unbekannte Werte werden ausgelassen, nicht als null erfunden.
+
 ```json
 {
   "total_requests": 42, "inflight": 0,
@@ -557,7 +565,7 @@ Lesart — die Zahlen beschreiben den laufenden Prozess, nicht das Konto.
   },
   "surfaces": { "chat_completions": 40, "responses": 2 },
   "models":  { "gpt-5.6-sol": { "requests": 42, "input_tokens": …, "hit_rate": 0.978 } },
-  "rate_limits": [ … ]
+  "limits": { … }
 }
 ```
 
@@ -571,11 +579,10 @@ Zwei Dinge, die dort bewusst so stehen:
 - **`cache.write_tokens` ist immer 0.** Das Feld existiert im Protokoll, das
   Abo-Backend füllt es auf diesem Pfad nicht — gemessen. Es wird trotzdem
   ausgegeben statt versteckt: ein Wert dort wäre eine Neuigkeit.
-- **`rate_limits` ist eine Liste, kein Objekt.** Das Backend schickt pro Turn
-  *mehrere* Fenster: das 7-Tage-Kontingent des Kontos und getrennt davon
-  Zusatzlimits einzelner Modelle. `wire::Event::RateLimits` unterscheidet sie
-  nicht, und nur das letzte zu behalten hieße, das Kontokontingent zugunsten
-  eines Limits wegzuwerfen, das 0 % anzeigt.
+- **`limits` enthält aufgelöste Gruppen.** Das Backend schickt pro Turn das
+  Kontokontingent und gegebenenfalls getrennte Zusatzlimits einzelner Modelle;
+  die Header-Projektion entfernt die doppelte Default-Familie und benennt die
+  aktive Gruppe.
 
 `outcomes` trennt vier Fälle: `end_turn` und `aborted` kommen vom Backend,
 `failed` ist ein Fehler im Stream, `rejected` ein Turn, den die Gegenstelle vor
