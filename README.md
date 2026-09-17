@@ -472,11 +472,11 @@ Jedes SSE-Ereignis ist ein JSON-Objekt in `data:`, unterschieden über `type`:
 `reasoning`, `rate_limits`, `done`, `failed`. Kein `event:`-Feld, damit der
 Konsument nur an einer Stelle nachsehen muss.
 
-`rate_limits` kommt **mehr als einmal pro Turn**: einmal für das 7-Tage-Kontingent
-des Kontos, dann für Zusatzlimits einzelner Modelle. Das Ereignis sagt nicht,
-welches es gerade trägt — wer nur das letzte behält, hat das Kontokontingent
-verloren. Bis `wire` das unterscheidet, ist Sammeln die einzige verlustfreie
-Verarbeitung; `/metrics` macht es vor.
+`rate_limits` kommt einmal pro Response, bereits nach Gruppen aufgelöst. Das
+abschließende `done` trägt neben der Token-Usage optional `credits`: den exakten,
+vom Backend gemeldeten Credit-Betrag dieser Response als Dezimal-String. Der
+String bleibt im Wire-Format unverändert; nur `/metrics/prometheus` wandelt ihn
+für die Aggregation in eine Fließkommazahl um.
 
 `thinking_break` trägt keinen Text: es markiert die Grenze zwischen zwei
 Denkblöcken. Das Backend liefert die Summary in mehreren Teilen, jeder ein
@@ -545,7 +545,9 @@ Token-Counter sind nach kanonischem Modell und `input_uncached`, `cache_read`,
 Primär-/Sekundärfenster, Fensterlänge, Reset und Beobachtungszeitpunkt. Anders als
 der JSON-Snapshot behält diese Projektion den letzten Stand jeder gesehenen Gruppe,
 damit ein Spark-Turn nicht den zuletzt bekannten globalen Stand aus der Zeitreihe
-entfernt. Unbekannte Werte werden ausgelassen, nicht als null erfunden.
+entfernt. `subscription_wrapper_credits_total` summiert gemeldete Credits pro
+Modell; `subscription_wrapper_credit_observations_total` macht fehlende Angaben
+sichtbar. Unbekannte Werte werden ausgelassen, nicht als null erfunden.
 
 ```json
 {
@@ -554,6 +556,7 @@ entfernt. Unbekannte Werte werden ausgelassen, nicht als null erfunden.
   "error_rate": 0.0238,
   "cache":   { "hit_rate": 0.978, "read_tokens": 7936, "write_tokens": 0, "input_tokens": 8115 },
   "tokens":  { "input": 8115, "output": 113, "reasoning": 93, "total": 8228 },
+  "credits": { "total": 0.42, "observations": 2 },
   "latency_ms": {
     "total": { "p50": 2473.2, "p95": …, "p99": …, "n": 2 },
     "ttft": { … }, "upstream_connect": { … }, "first_event": { … },

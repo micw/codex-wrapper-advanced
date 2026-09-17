@@ -96,6 +96,9 @@ pub enum Event {
         /// observed from the backend so far.
         stop_reason: String,
         usage: Option<Usage>,
+        /// Exact per-response credit amount reported by the backend. Kept as a
+        /// decimal string so the wire format does not lose upstream precision.
+        credits: Option<String>,
     },
     /// Separate from `Done`, because `response.failed` and a clean ending are two
     /// different cases (KONTEXT-HARNESS.md §7).
@@ -262,5 +265,17 @@ mod tests {
             !object["version"].as_str().unwrap_or_default().is_empty(),
             "version comes from Cargo.toml and can never be empty"
         );
+    }
+
+    #[test]
+    fn done_preserves_exact_credit_amount_as_a_string() {
+        let event = Event::Done {
+            response_id: Some("resp_1".to_string()),
+            stop_reason: "end_turn".to_string(),
+            usage: None,
+            credits: Some("0.12345678901234567890".to_string()),
+        };
+        let value = serde_json::to_value(event).expect("serialises");
+        assert_eq!(value["credits"], "0.12345678901234567890");
     }
 }

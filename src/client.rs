@@ -614,7 +614,7 @@ fn map_one(event: ResponseEvent, slot: &ServerModelSlot) -> Vec<Event> {
             }
             vec![]
         }
-        ResponseEvent::Created => {
+        ResponseEvent::Created { .. } => {
             let model = slot.model.lock().ok().and_then(|g| g.clone());
             vec![Event::Started { model }]
         }
@@ -676,6 +676,7 @@ fn map_one(event: ResponseEvent, slot: &ServerModelSlot) -> Vec<Event> {
         ResponseEvent::Completed {
             response_id,
             token_usage,
+            usage_metadata,
             end_turn,
         } => vec![Event::Done {
             response_id: Some(response_id),
@@ -694,6 +695,7 @@ fn map_one(event: ResponseEvent, slot: &ServerModelSlot) -> Vec<Event> {
                 reasoning_output_tokens: Some(u.reasoning_output_tokens),
                 total_tokens: Some(u.total_tokens),
             }),
+            credits: usage_metadata.and_then(|metadata| metadata.amount),
         }],
         // Everything else (ModelsEtag, OutputItemAdded, SafetyBuffering, ...) has
         // no taker in this vocabulary.
@@ -909,6 +911,27 @@ mod tests {
         let req = request(vec![image.clone()]);
         let body = build_body(&req);
         assert_eq!(body["input"][0], image);
+    }
+
+    #[test]
+    fn completed_response_preserves_exact_credit_amount() {
+        let events = map_one(
+            ResponseEvent::Completed {
+                response_id: "resp_credit".to_string(),
+                token_usage: None,
+                usage_metadata: Some(codex_protocol::ResponseUsageMetadata {
+                    amount: Some("0.12345678901234567890".to_string()),
+                    metadata: None,
+                }),
+                end_turn: Some(true),
+            },
+            &ServerModelSlot::default(),
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [Event::Done { credits: Some(amount), .. }]
+                if amount == "0.12345678901234567890"
+        ));
     }
 
     /// Deterministic across processes: the value is written out here rather than

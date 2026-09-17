@@ -1036,6 +1036,7 @@ mod tests {
             response_id: None,
             stop_reason: "end_turn".into(),
             usage: None,
+            credits: None,
         });
         // Exactly one reasoning item, and it is the one that can be replayed.
         assert_eq!(state.response()["output"], json!([item]));
@@ -1060,6 +1061,7 @@ mod tests {
             response_id: None,
             stop_reason: "end_turn".into(),
             usage: None,
+            credits: None,
         });
 
         let output = state.response()["output"].clone();
@@ -1089,6 +1091,7 @@ mod tests {
             response_id: None,
             stop_reason: "end_turn".into(),
             usage: None,
+            credits: None,
         });
         assert_eq!(state.response()["output"].as_array().unwrap().len(), 2);
     }
@@ -1106,6 +1109,7 @@ mod tests {
                 total_tokens: Some(7),
                 ..Default::default()
             }),
+            credits: None,
         });
         let completed = payloads(&lines, "response.completed");
         assert_eq!(completed.len(), 1);

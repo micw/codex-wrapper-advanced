@@ -57,6 +57,8 @@ struct Inner {
     rejections: HashMap<u16, u64>,
     surfaces: HashMap<String, u64>,
     models: HashMap<String, ModelStats>,
+    credits: f64,
+    credit_observations: u64,
     quota_groups: HashMap<String, ObservedQuota>,
     plan: Option<String>,
     tokens: Tokens,
@@ -96,6 +98,8 @@ struct ModelStats {
     cache_write: i64,
     output: i64,
     reasoning: i64,
+    credits: f64,
+    credit_observations: u64,
 }
 
 struct ObservedQuota {
@@ -139,6 +143,7 @@ impl Metrics {
             max_event_gap_ms: 0.0,
             request: None,
             usage: None,
+            credits: None,
             outcome: None,
         }
     }
@@ -223,6 +228,13 @@ impl Metrics {
             model.output += usage.output_tokens.unwrap_or(0);
             model.reasoning += usage.reasoning_output_tokens.unwrap_or(0);
         }
+        if let Some(credits) = turn.credits.as_deref().and_then(parse_credits) {
+            inner.credits += credits;
+            inner.credit_observations += 1;
+            let model = inner.models.entry(turn.model.clone()).or_default();
+            model.credits += credits;
+            model.credit_observations += 1;
+        }
         drop(inner);
         turn.log_line(outcome, total_ms)
     }
@@ -249,6 +261,8 @@ impl Metrics {
                         "cache_write_tokens": stats.cache_write,
                         "output_tokens": stats.output,
                         "reasoning_tokens": stats.reasoning,
+                        "credits": stats.credits,
+                        "credit_observations": stats.credit_observations,
                         "hit_rate": ratio(stats.cached, stats.input),
                     }),
                 )
@@ -282,6 +296,10 @@ impl Metrics {
                 "output": t.output,
                 "reasoning": t.reasoning,
                 "total": t.total,
+            },
+            "credits": {
+                "total": inner.credits,
+                "observations": inner.credit_observations,
             },
             "latency_ms": {
                 "total": band(&inner.total_ms),
@@ -373,6 +391,30 @@ impl Metrics {
             }
         }
         lines.extend([
+            "# HELP subscription_wrapper_credits_total Provider-reported per-response credits by model.".to_string(),
+            "# TYPE subscription_wrapper_credits_total counter".to_string(),
+            "# HELP subscription_wrapper_credit_observations_total Responses carrying a valid credit amount.".to_string(),
+            "# TYPE subscription_wrapper_credit_observations_total counter".to_string(),
+        ]);
+        let mut models: Vec<_> = inner.models.iter().collect();
+        models.sort_by(|(left, _), (right, _)| left.cmp(right));
+        for (model, stats) in models {
+            if stats.credit_observations == 0 {
+                continue;
+            }
+            let labels = [("provider", "codex"), ("model", model.as_str())];
+            lines.push(sample(
+                "subscription_wrapper_credits_total",
+                stats.credits,
+                &labels,
+            ));
+            lines.push(sample(
+                "subscription_wrapper_credit_observations_total",
+                stats.credit_observations,
+                &labels,
+            ));
+        }
+        lines.extend([
             "# HELP subscription_wrapper_quota_used_ratio Used fraction of a subscription quota window.".to_string(),
             "# TYPE subscription_wrapper_quota_used_ratio gauge".to_string(),
             "# HELP subscription_wrapper_quota_window_seconds Configured quota window length.".to_string(),
@@ -456,6 +498,7 @@ pub struct TurnRecorder {
     max_event_gap_ms: f64,
     request: Option<RequestObservation>,
     usage: Option<Usage>,
+    credits: Option<String>,
     outcome: Option<String>,
 }
 
@@ -517,10 +560,14 @@ impl TurnRecorder {
                 }
             }
             Event::Done {
-                stop_reason, usage, ..
+                stop_reason,
+                usage,
+                credits,
+                ..
             } => {
                 self.outcome = Some(stop_reason.clone());
                 self.usage = usage.clone();
+                self.credits = credits.clone();
             }
             Event::Failed { .. } => self.outcome = Some("failed".to_string()),
             _ => {}
@@ -614,6 +661,13 @@ fn push(buffer: &mut VecDeque<f64>, value: f64, window: usize) {
     buffer.push_back(value);
 }
 
+fn parse_credits(value: &str) -> Option<f64> {
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|credits| credits.is_finite() && *credits >= 0.0)
+}
+
 fn sample<T: std::fmt::Display>(name: &str, value: T, labels: &[(&str, &str)]) -> String {
     let labels = labels
         .iter()
@@ -701,6 +755,7 @@ mod tests {
             response_id: Some("resp_1".into()),
             stop_reason: "end_turn".into(),
             usage: Some(usage(input, cached, output)),
+            credits: None,
         }
     }
 
@@ -724,6 +779,37 @@ mod tests {
         assert_eq!(snap["surfaces"][SURFACE_CHAT], 1);
         assert_eq!(snap["models"]["gpt-5.6-sol"]["requests"], 1);
         assert_eq!(snap["latency_ms"]["ttft"]["n"], 1);
+    }
+
+    #[test]
+    fn credits_are_counted_by_model_when_the_backend_reports_them() {
+        let metrics = Arc::new(Metrics::new());
+        for amount in [Some("24.125"), None, Some("not-a-number")] {
+            let mut turn = metrics.start_turn(SURFACE_WIRE, "local", "gpt-5.6-sol");
+            turn.observe(&Event::Done {
+                response_id: Some("resp_credit".into()),
+                stop_reason: "end_turn".into(),
+                usage: None,
+                credits: amount.map(str::to_string),
+            });
+        }
+
+        let snap = metrics.snapshot();
+        assert_eq!(snap["credits"]["total"], 24.125);
+        assert_eq!(snap["credits"]["observations"], 1);
+        assert_eq!(snap["models"]["gpt-5.6-sol"]["credits"], 24.125);
+        assert_eq!(
+            snap["models"]["gpt-5.6-sol"]["credit_observations"],
+            1
+        );
+
+        let text = metrics.prometheus();
+        assert!(text.contains(
+            r#"subscription_wrapper_credits_total{provider="codex",model="gpt-5.6-sol"} 24.125"#
+        ));
+        assert!(text.contains(
+            r#"subscription_wrapper_credit_observations_total{provider="codex",model="gpt-5.6-sol"} 1"#
+        ));
     }
 
     #[test]

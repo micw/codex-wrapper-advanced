@@ -598,6 +598,7 @@ mod tests {
                     total_tokens: Some(1),
                     ..Default::default()
                 }),
+                credits: None,
             },
             "id",
             "requested",
