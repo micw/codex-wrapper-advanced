@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "codex-agent-identity"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -976,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "codex-api"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "async-channel",
  "base64 0.22.1",
@@ -1030,15 +1030,16 @@ dependencies = [
 
 [[package]]
 name = "codex-async-utils"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
+ "rand 0.9.5",
  "tokio",
  "tokio-util",
 ]
 
 [[package]]
 name = "codex-client"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "codex-http-client",
  "eventsource-stream",
@@ -1051,7 +1052,7 @@ dependencies = [
 
 [[package]]
 name = "codex-config"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1066,6 +1067,7 @@ dependencies = [
  "codex-utils-path",
  "codex-utils-path-uri",
  "codex-utils-redacted-string",
+ "codex-windows-sandbox",
  "core-foundation 0.9.4",
  "dns-lookup",
  "dunce",
@@ -1096,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "codex-execpolicy"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1113,7 +1115,7 @@ dependencies = [
 
 [[package]]
 name = "codex-extension-items"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "codex-utils-absolute-path",
  "schemars 0.8.22",
@@ -1124,8 +1126,9 @@ dependencies = [
 
 [[package]]
 name = "codex-features"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
+ "codex-network-proxy",
  "codex-otel",
  "codex-protocol",
  "schemars 0.8.22",
@@ -1136,7 +1139,7 @@ dependencies = [
 
 [[package]]
 name = "codex-file-system"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "bytes",
  "codex-protocol",
@@ -1148,7 +1151,7 @@ dependencies = [
 
 [[package]]
 name = "codex-git-utils"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1173,7 +1176,7 @@ dependencies = [
 
 [[package]]
 name = "codex-http-client"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "bytes",
  "codex-utils-rustls-provider",
@@ -1185,6 +1188,7 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "rustls-pki-types",
+ "rustls-platform-verifier",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1199,7 +1203,7 @@ dependencies = [
 
 [[package]]
 name = "codex-keyring-store"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "keyring",
  "tracing",
@@ -1207,7 +1211,7 @@ dependencies = [
 
 [[package]]
 name = "codex-login"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1240,7 +1244,7 @@ dependencies = [
 
 [[package]]
 name = "codex-model-provider-info"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "codex-api",
  "codex-protocol",
@@ -1248,11 +1252,12 @@ dependencies = [
  "http",
  "schemars 0.8.22",
  "serde",
+ "url",
 ]
 
 [[package]]
 name = "codex-network-proxy"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1260,10 +1265,12 @@ dependencies = [
  "clap",
  "codex-utils-absolute-path",
  "codex-utils-home-dir",
+ "codex-utils-path-uri",
  "codex-utils-rustls-provider",
  "globset",
  "opentelemetry",
  "rama-core",
+ "rama-dns",
  "rama-http",
  "rama-http-backend",
  "rama-net",
@@ -1272,23 +1279,30 @@ dependencies = [
  "rama-tls-rustls",
  "rama-unix",
  "rand 0.9.5",
+ "rand_regex",
+ "regex",
+ "regex-automata",
+ "regex-syntax",
  "rustls-native-certs",
  "schannel",
+ "schemars 0.8.22",
  "security-framework 3.7.0",
  "serde",
+ "serde_ignored",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.20",
  "time",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "url",
  "windows-sys 0.52.0",
 ]
 
 [[package]]
 name = "codex-otel"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "chrono",
  "codex-api",
@@ -1318,7 +1332,7 @@ dependencies = [
 
 [[package]]
 name = "codex-protocol"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "chardetng",
  "chrono",
@@ -1359,7 +1373,7 @@ dependencies = [
 
 [[package]]
 name = "codex-secrets"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "age",
  "anyhow",
@@ -1377,14 +1391,14 @@ dependencies = [
 
 [[package]]
 name = "codex-terminal-detection"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "tracing",
 ]
 
 [[package]]
 name = "codex-utils-absolute-path"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "dirs",
  "dunce",
@@ -1395,7 +1409,7 @@ dependencies = [
 
 [[package]]
 name = "codex-utils-cache"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "lru",
  "sha1",
@@ -1404,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "codex-utils-home-dir"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "codex-utils-absolute-path",
  "dirs",
@@ -1412,7 +1426,7 @@ dependencies = [
 
 [[package]]
 name = "codex-utils-image"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "base64 0.22.1",
  "codex-utils-cache",
@@ -1424,7 +1438,7 @@ dependencies = [
 
 [[package]]
 name = "codex-utils-path"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "codex-utils-absolute-path",
  "dunce",
@@ -1434,7 +1448,7 @@ dependencies = [
 
 [[package]]
 name = "codex-utils-path-uri"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "base64 0.22.1",
  "codex-utils-absolute-path",
@@ -1448,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "codex-utils-pty"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "anyhow",
  "filedescriptor",
@@ -1463,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "codex-utils-redacted-string"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "schemars 0.8.22",
  "serde",
@@ -1471,14 +1485,14 @@ dependencies = [
 
 [[package]]
 name = "codex-utils-rustls-provider"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "rustls",
 ]
 
 [[package]]
 name = "codex-utils-string"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "regex-lite",
  "serde",
@@ -1487,11 +1501,11 @@ dependencies = [
 
 [[package]]
 name = "codex-utils-template"
-version = "0.154.0"
+version = "0.156.1"
 
 [[package]]
 name = "codex-websocket-client"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "codex-http-client",
  "futures",
@@ -1503,8 +1517,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-windows-sandbox"
+version = "0.156.1"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "codex-otel",
+ "codex-protocol",
+ "codex-utils-absolute-path",
+ "codex-utils-pty",
+ "codex-utils-string",
+ "dirs-next",
+ "dunce",
+ "glob",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing-appender",
+ "windows",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "codex-workload-identity"
-version = "0.154.0"
+version = "0.156.1"
 dependencies = [
  "codex-http-client",
  "serde",
@@ -2088,6 +2127,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dirs-next"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b98cf8ebf19c3d1b223e151f99a4f9f0690dca41414773390fc824184ac833e1"
+dependencies = [
+ "cfg-if",
+ "dirs-sys-next",
+]
+
+[[package]]
 name = "dirs-sys"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2095,8 +2144,19 @@ checksum = "e01a3366d27ee9890022452ee61b2b63a67e6f13f58900b651ff5665f0bb1fab"
 dependencies = [
  "libc",
  "option-ext",
- "redox_users",
+ "redox_users 0.5.3",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "dirs-sys-next"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ebda144c4fe02d1f7ea1a7d9641b6fc6b580adcfa024ae48797ecdeb6825b4d"
+dependencies = [
+ "libc",
+ "redox_users 0.4.6",
+ "winapi",
 ]
 
 [[package]]
@@ -2739,7 +2799,7 @@ dependencies = [
  "log",
  "rustversion",
  "windows-link",
- "windows-result",
+ "windows-result 0.4.1",
 ]
 
 [[package]]
@@ -3668,6 +3728,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
 name = "globset"
 version = "0.4.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4130,7 +4196,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -4456,7 +4522,7 @@ dependencies = [
  "socket2",
  "widestring",
  "windows-registry",
- "windows-result",
+ "windows-result 0.4.1",
  "windows-sys 0.61.2",
 ]
 
@@ -6532,6 +6598,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand_regex"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04db2e382d13679a1e42400e90e306cdbb79dc5cd41bb035ba4eae72e78cdf37"
+dependencies = [
+ "rand 0.9.5",
+ "regex-syntax",
+]
+
+[[package]]
 name = "rand_xorshift"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6571,6 +6647,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags 2.13.2",
+]
+
+[[package]]
+name = "redox_users"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba009ff324d1fc1b900bd1fdb31564febe58a8ccc8a6fdbb93b543d33b13ca43"
+dependencies = [
+ "getrandom 0.2.17",
+ "libredox",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -6824,6 +6911,33 @@ dependencies = [
  "web-time",
  "zeroize",
 ]
+
+[[package]]
+name = "rustls-platform-verifier"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26d1e2536ce4f35f4846aa13bff16bd0ff40157cdb14cc056c7b14ba41233ba0"
+dependencies = [
+ "core-foundation 0.10.1",
+ "core-foundation-sys",
+ "jni",
+ "log",
+ "once_cell",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-platform-verifier-android",
+ "rustls-webpki",
+ "security-framework 3.7.0",
+ "security-framework-sys",
+ "webpki-root-certs",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rustls-platform-verifier-android"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
@@ -7653,6 +7767,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
+name = "symlink"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7973cce6668464ea31f176d85b13c7ab3bba2cb3b77a2ed26abd7801688010a"
+
+[[package]]
 name = "syn"
 version = "1.0.109"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8192,6 +8312,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-appender"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "050686193eb999b4bb3bc2acfa891a13da00f79734704c4b8b4ef1a10b368a3c"
+dependencies = [
+ "crossbeam-channel",
+ "symlink",
+ "thiserror 2.0.20",
+ "time",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tracing-attributes"
 version = "0.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8646,6 +8779,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "webpki-root-certs"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
 name = "webpki-roots"
 version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8713,16 +8855,50 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
+name = "windows"
+version = "0.58.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd04d41d93c4992d421894c18c8b43496aa748dd4c081bac0dc93eb0489272b6"
+dependencies = [
+ "windows-core 0.58.0",
+ "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "windows-core"
+version = "0.58.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ba6d44ec8c2591c134257ce647b7ea6b20335bf6379a27dac5f1641fcf59f99"
+dependencies = [
+ "windows-implement 0.58.0",
+ "windows-interface 0.58.0",
+ "windows-result 0.2.0",
+ "windows-strings 0.1.0",
+ "windows-targets 0.52.6",
+]
+
+[[package]]
 name = "windows-core"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
 dependencies = [
- "windows-implement",
- "windows-interface",
+ "windows-implement 0.60.2",
+ "windows-interface 0.59.3",
  "windows-link",
- "windows-result",
- "windows-strings",
+ "windows-result 0.4.1",
+ "windows-strings 0.5.1",
+]
+
+[[package]]
+name = "windows-implement"
+version = "0.58.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bbd5b46c938e506ecbce286b6628a02171d56153ba733b6c741fc627ec9579b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -8730,6 +8906,17 @@ name = "windows-implement"
 version = "0.60.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "windows-interface"
+version = "0.58.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "053c4c462dc91d3b1504c6fe5a726dd15e216ba718e84a0e46a88fbe5ded3515"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -8760,8 +8947,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02752bf7fbdcce7f2a27a742f798510f3e5ad88dbe84871e5168e2120c3d5720"
 dependencies = [
  "windows-link",
- "windows-result",
- "windows-strings",
+ "windows-result 0.4.1",
+ "windows-strings 0.5.1",
+]
+
+[[package]]
+name = "windows-result"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d1043d8214f791817bab27572aaa8af63732e11bf84aa21a45a78d6c317ae0e"
+dependencies = [
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -8771,6 +8967,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "windows-strings"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cd9b125c486025df0eabcb585e62173c6c9eddcec5d117d3b6e8c30e2ee4d10"
+dependencies = [
+ "windows-result 0.2.0",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]

@@ -52,6 +52,7 @@ use crate::wire::Usage;
 /// Base URL of the subscription backend. `ResponsesClient` appends `responses`.
 const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(900);
+const MAX_MODEL_CATALOG_BYTES: usize = 1024 * 1024;
 
 // --- Auth provider ---------------------------------------------------------
 
@@ -445,7 +446,7 @@ impl Client {
         &self,
         mut req: StreamRequest,
     ) -> Result<impl Stream<Item = Event> + use<>, UpstreamError> {
-        // `gpt-5.6-sol:long` is the same model with a different budget in the
+        // A `:long` id is the same model with a different budget in the
         // caller's head. Stripped here rather than per surface, so the cache key
         // and the body both see the name the backend knows — and both variants
         // therefore share a cache entry, which is right: the requests are
@@ -514,7 +515,7 @@ impl Client {
                 codex_api::ModelsClient::<ReqwestTransport>::request_url(&provider, client_version);
             async move {
                 let (models, _etag) = client
-                    .list_models(url, HeaderMap::new())
+                    .list_models(url, HeaderMap::new(), Some(MAX_MODEL_CATALOG_BYTES))
                     .await
                     .map_err(UpstreamError::from)?;
                 Ok(models)

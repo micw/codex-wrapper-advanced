@@ -185,17 +185,17 @@ Wer die Rohdaten braucht, hängt **`?raw=true`** an.
 {
   "models": [
     {
-      "id": "gpt-5.6-sol",
-      "model": "gpt-5.6-sol",
-      "display_name": "GPT-5.6-Sol",
-      "description": "Latest frontier agentic coding model.",
+      "id": "gpt-6-sol",
+      "model": "gpt-6-sol",
+      "display_name": "GPT-6-Sol",
+      "description": "Workhorse model for coding and everyday work.",
       "hidden": false,
       "input_modalities": ["text", "image"],
       "default_context_length": 272000,
       "max_context_length": 872000,
       "reasoning": {
         "levels": ["none", "low", "medium", "high", "xhigh", "max"],
-        "default": "low",
+        "default": "medium",
         "summary_supported": true
       }
     }
@@ -211,7 +211,7 @@ der OpenAI-Oberfläche laufen sie auseinander (s.u.).
 
 | Feld | Herkunft | Bedeutung |
 |---|---|---|
-| `default_context_length` | `context_window` | womit Codex selbst fährt — steht bei **allen** Modellen auf 272 000, außer Spark (128 000) |
+| `default_context_length` | `context_window` | womit Codex selbst fährt — im aktuellen Katalog 272 000 für alle Modelle |
 | `max_context_length` | `max_context_window`, korrigiert | die tatsächlich nutzbare Obergrenze |
 
 Eine Kompaktierungsschwelle liefern wir **nicht** mit. Codex nimmt 90 % seines
@@ -238,8 +238,8 @@ Spark haben `max == default`, also keinen Spielraum.
 #### Reasoning
 
 `reasoning.levels` ist die **korrigierte** Liste, nicht die des Katalogs — `ultra`
-entfernt, `none` ergänzt außer bei `gpt-5.3-codex-spark` (Messdaten unter
-„OpenAI-kompatibel" und in MESSUNGEN.md §14.1). `default` ist der Vorgabewert des
+entfernt, `none` ergänzt außer bei `gpt-6-astra` (Messdaten unter
+„OpenAI-kompatibel"). `default` ist der Vorgabewert des
 Backends und bleibt unangetastet; er kann außerhalb von `levels` liegen, wenn das
 Backend seine eigene Liste verletzt.
 
@@ -286,6 +286,8 @@ und was möglich ist. Ausgedrückt wird das hier als zweiter Eintrag:
 
 | `id` | `model` (ans Backend) | `context_length` |
 |---|---|---:|
+| `gpt-6-sol` | `gpt-6-sol` | 272 000 |
+| `gpt-6-sol:long` | `gpt-6-sol` | 872 000 |
 | `gpt-5.6-sol` | `gpt-5.6-sol` | 272 000 |
 | `gpt-5.6-sol:long` | `gpt-5.6-sol` | 872 000 |
 
@@ -295,10 +297,10 @@ budgetiert. Die Variante ist eine **Budgetempfehlung**, keine Fähigkeit, die wi
 zuschalten. Der Suffix wird vor dem Senden abgeschnitten — deshalb sind `id` und
 `model` im Wire-Katalog getrennt.
 
-**Nur für `gpt-5.6-sol`.** Berechtigt wären sechs Modelle (`max > default`), aber
+**Nur für aktuelles und vorheriges Sol.** Berechtigt wären mehrere Modelle (`max > default`), aber
 eine Variante verdoppelt einen Eintrag im Modellwähler für null funktionalen
-Unterschied. `sol` ist das Arbeitspferd; für alles andere liefert
-`/wire/v1/models` `max_context_length`, und wer terra mit 872 000 fahren will,
+Unterschied. Sol ist das Arbeitspferd; für alles andere liefert
+`/wire/v1/models` `max_context_length`, und wer ein anderes Modell mit 872 000 fahren will,
 budgetiert das selbst. Eine weitere Variante ist eine Zeile, sobald es einen Fall
 dafür gibt.
 
@@ -308,14 +310,14 @@ Fähigkeit aus; ob man sie ausreizt, bleibt eine Budgetentscheidung des Clients.
 
 **`reasoning_levels` wird korrigiert, nicht durchgereicht.** Der Katalog des
 Backends widerspricht seiner eigenen Prüfung, und zwar in beide Richtungen:
-`ultra` steht bei `gpt-5.6-sol` und `-terra` in `supported_reasoning_levels`,
-jeder Request damit bekommt `400 Invalid value: 'ultra'` — gemessen am
-2026-08-27 auf drei Modellen. Umgekehrt fehlt `none`, das überall angenommen wird
-und das Denken abschaltet (`reasoning_output_tokens: 0`). Ein Modellwähler, der
+`ultra` steht bei `gpt-6-astra` und `gpt-6-sol` in `supported_reasoning_levels`,
+jeder Request damit bekommt `400 Invalid value: 'ultra'` — zuletzt direkt am
+Subscription-Endpoint am 2026-09-24 gemessen. Umgekehrt fehlt `none`, das bei Sol
+und Luna angenommen wird und das Denken abschaltet (`reasoning_output_tokens: 0`). Ein Modellwähler, der
 sich direkt aus dem Katalog speist, böte also einen Wert an, der nicht wählbar
 ist, und verschwiege den schnellsten. Deshalb fliegt `ultra` raus und `none`
-kommt dazu — letzteres **außer bei `gpt-5.3-codex-spark`**, dem einzigen der neun
-Modelle, das `none` ablehnt. Alle drei Listen stehen als Konstante mit Messdatum
+kommt dazu — letzteres **außer bei `gpt-6-astra`**, das `none` nachweislich
+ablehnt. Alle drei Listen stehen als Konstante mit Messdatum
 in [src/models.rs](src/models.rs). Nicht ergänzt wird `minimal` — das Backend nennt
 es in seiner allgemeinen Fehlermeldung, lehnt es für diese Modelle aber
 ausdrücklich ab.

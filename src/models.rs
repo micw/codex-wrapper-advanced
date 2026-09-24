@@ -33,9 +33,9 @@ const REJECTED_REASONING_LEVELS: &[&str] = &["ultra"];
 
 /// Accepted by the API but missing from `supported_reasoning_levels`.
 ///
-/// Measured 2026-08-27 across all nine models: eight take `none` and switch
-/// reasoning off (`reasoning_output_tokens: 0`). It is the one level a caller
-/// cannot otherwise reach, and the fastest one.
+/// Measured 2026-09-24: Sol and Luna take `none` and switch reasoning off
+/// (`reasoning_output_tokens: 0`). It is the one level a caller cannot otherwise
+/// reach, and the fastest one.
 ///
 /// Deliberately not added: `minimal`. The backend names it in its generic error
 /// message but answers `Unsupported value: 'minimal' is not supported with the
@@ -44,13 +44,10 @@ const UNADVERTISED_REASONING_LEVEL: &str = "none";
 
 /// Models that reject [`UNADVERTISED_REASONING_LEVEL`].
 ///
-/// `gpt-5.3-codex-spark` answers `Unsupported value: 'none' is not supported with
-/// the 'gpt-5.3-codex-spark' model` — for it, advertised and accepted already
-/// agree. Keyed by slug on purpose: `supports_reasoning_summary_parameter: false`
-/// happens to be set on the same model and is tempting as the rule, but that
-/// field is about summaries, not effort levels, and tying them together would be
-/// a guess dressed up as a mechanism.
-const NONE_UNSUPPORTED_MODELS: &[&str] = &["gpt-5.3-codex-spark"];
+/// `gpt-6-astra` rejects `none`; advertised and accepted already agree once
+/// `ultra` is removed. Keyed by slug because no catalogue capability describes
+/// support for disabling reasoning.
+const NONE_UNSUPPORTED_MODELS: &[&str] = &["gpt-6-astra", "gpt-5.3-codex-spark"];
 
 /// Caps on `max_context_window` where the catalogue over-promises.
 ///
@@ -66,10 +63,10 @@ const MAX_CONTEXT_CAPS: &[(&str, i64)] = &[("gpt-5.4", 872_000)];
 ///
 /// Six models would qualify by `max > default`, but a variant doubles a picker
 /// entry for **no functional difference** — both ids produce byte-identical
-/// requests, since the daemon sends no context field at all. `gpt-5.6-sol` is the
-/// workhorse; for everything else `/wire/v1/models` carries
+/// requests, since the daemon sends no context field at all. Current and previous
+/// Sol are the workhorses; for everything else `/wire/v1/models` carries
 /// `max_context_length` and a consumer can budget it itself.
-const LONG_VARIANTS: &[&str] = &["gpt-5.6-sol"];
+const LONG_VARIANTS: &[&str] = &["gpt-6-sol", "gpt-5.6-sol"];
 
 /// Separator between model and variant. Matches the house convention on the
 /// Claude side (`opus:high`).
@@ -80,7 +77,7 @@ const LONG_SUFFIX: &str = "long";
 
 /// Strips a variant suffix, yielding the name the backend knows.
 ///
-/// `gpt-5.6-sol:long` and `gpt-5.6-sol` are the same model — the variant only
+/// `gpt-6-sol:long` and `gpt-6-sol` are the same model — the variant only
 /// says which context budget the caller intends to keep to.
 pub fn wire_model(id: &str) -> &str {
     id.split_once(VARIANT_SEPARATOR)
@@ -247,7 +244,7 @@ mod tests {
         let list = &wire["models"];
 
         assert_eq!(list.as_array().map(Vec::len), Some(9));
-        assert_eq!(find(list, "gpt-5.6-sol").unwrap()["hidden"], false);
+        assert_eq!(find(list, "gpt-6-sol").unwrap()["hidden"], false);
         assert_eq!(find(list, "gpt-reserve").unwrap()["hidden"], true);
         assert_eq!(find(list, "codex-auto-review").unwrap()["hidden"], true);
     }
@@ -264,7 +261,7 @@ mod tests {
     #[test]
     fn both_context_values_are_reported() {
         let wire = catalogue(&models());
-        let sol = find(&wire["models"], "gpt-5.6-sol").unwrap();
+        let sol = find(&wire["models"], "gpt-6-sol").unwrap();
 
         assert_eq!(sol["default_context_length"], 272_000);
         assert_eq!(sol["max_context_length"], 872_000);
@@ -276,13 +273,12 @@ mod tests {
     /// The one correction. `gpt-5.4` declares a million and refuses ~950 000.
     #[test]
     fn an_over_promised_maximum_is_capped() {
-        let wire = catalogue(&models());
-        let five_four = find(&wire["models"], "gpt-5.4").unwrap();
+        let mut five_four = models()[0].clone();
+        five_four["slug"] = json!("gpt-5.4");
+        five_four["max_context_window"] = json!(1_000_000);
 
-        assert_eq!(
-            five_four["max_context_length"], 872_000,
-            "capped, not 1000000"
-        );
+        assert_eq!(context_max(&five_four), Some(872_000));
+        let wire = catalogue(&models());
         // Everyone else keeps the catalogue's word.
         assert_eq!(
             find(&wire["models"], "gpt-5.6-terra").unwrap()["max_context_length"],
@@ -310,20 +306,27 @@ mod tests {
     #[test]
     fn reasoning_levels_match_what_the_api_accepts() {
         let list = models();
-        let sol = list.iter().find(|m| m["slug"] == "gpt-5.6-sol").unwrap();
-        let spark = list
-            .iter()
-            .find(|m| m["slug"] == "gpt-5.3-codex-spark")
-            .unwrap();
+        let astra = list.iter().find(|m| m["slug"] == "gpt-6-astra").unwrap();
+        let sol = list.iter().find(|m| m["slug"] == "gpt-6-sol").unwrap();
+        let luna = list.iter().find(|m| m["slug"] == "gpt-6-luna").unwrap();
+        let old_sol = list.iter().find(|m| m["slug"] == "gpt-5.6-sol").unwrap();
 
-        // `ultra` is advertised for sol and rejected by the backend; `none` is
-        // accepted and not advertised.
+        assert_eq!(
+            reasoning_levels(astra),
+            ["low", "medium", "high", "xhigh", "max"]
+        );
         assert_eq!(
             reasoning_levels(sol),
             ["none", "low", "medium", "high", "xhigh", "max"]
         );
-        // Spark is the one model that refuses `none`.
-        assert_eq!(reasoning_levels(spark), ["low", "medium", "high", "xhigh"]);
+        assert_eq!(
+            reasoning_levels(luna),
+            ["none", "low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(
+            reasoning_levels(old_sol),
+            ["none", "low", "medium", "high", "xhigh", "max"]
+        );
     }
 
     #[test]
@@ -341,7 +344,7 @@ mod tests {
         let list = openai_list(&models());
         assert_eq!(list["object"], "list");
 
-        assert!(find(&list["data"], "gpt-5.6-sol").is_some());
+        assert!(find(&list["data"], "gpt-6-sol").is_some());
         assert!(find(&list["data"], "gpt-reserve").is_none());
         assert!(find(&list["data"], "codex-auto-review").is_none());
     }
@@ -349,10 +352,15 @@ mod tests {
     /// The variant is a budget label, so it exists only where it buys something
     /// and only for the model people actually run.
     #[test]
-    fn only_sol_gets_a_long_variant() {
+    fn current_and_previous_sol_get_long_variants() {
         let list = openai_list(&models());
         let data = &list["data"];
 
+        assert_eq!(find(data, "gpt-6-sol").unwrap()["context_length"], 272_000);
+        assert_eq!(
+            find(data, "gpt-6-sol:long").unwrap()["context_length"],
+            872_000
+        );
         assert_eq!(
             find(data, "gpt-5.6-sol").unwrap()["context_length"],
             272_000
@@ -363,17 +371,19 @@ mod tests {
         );
 
         // Would qualify by `max > default`, but is not offered.
+        assert!(find(data, "gpt-6-astra:long").is_none());
+        assert!(find(data, "gpt-6-luna:long").is_none());
         assert!(find(data, "gpt-5.6-terra:long").is_none());
-        assert!(find(data, "gpt-5.4:long").is_none());
         // No headroom at all — a variant would be pure noise.
         assert!(find(data, "gpt-5.5:long").is_none());
-        assert!(find(data, "gpt-5.3-codex-spark:long").is_none());
     }
 
     /// Both ids reach the same model: the daemon sends no context field, so the
     /// requests are byte-identical.
     #[test]
     fn the_variant_suffix_is_stripped_for_the_backend() {
+        assert_eq!(wire_model("gpt-6-sol:long"), "gpt-6-sol");
+        assert_eq!(wire_model("gpt-6-sol"), "gpt-6-sol");
         assert_eq!(wire_model("gpt-5.6-sol:long"), "gpt-5.6-sol");
         assert_eq!(wire_model("gpt-5.6-sol"), "gpt-5.6-sol");
         assert_eq!(wire_model("gpt-5.3-codex-spark"), "gpt-5.3-codex-spark");

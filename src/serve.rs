@@ -409,7 +409,7 @@ async fn usage(State(state): State<AppState>, headers: HeaderMap) -> axum::respo
 ///
 /// Hidden models are dropped, and a model carries **one** context length because
 /// that is what an OpenAI client expects. Where the extra budget is worth
-/// offering, it appears as a second entry (`gpt-5.6-sol:long`) — see
+/// offering, it appears as a second entry (`gpt-6-sol:long`) — see
 /// [`crate::models`]. `/wire/v1/models` carries both values for every model.
 async fn openai_models(
     State(state): State<AppState>,

@@ -44,15 +44,14 @@ pub mod wire;
 
 /// Default model.
 ///
-/// Measured 2026-08-24: the `gpt-5.x-codex` slugs from the prompt files in the
-/// upstream repo no longer exist. The backend serves gpt-5.6-{sol,terra,luna},
-/// gpt-5.5, gpt-5.4{,-mini}. Run `models` before changing this.
-pub const DEFAULT_MODEL: &str = "gpt-5.6-sol";
+/// Measured 2026-09-24: GPT-6 Sol is the general-purpose workhorse model. Run
+/// `models` before changing this.
+pub const DEFAULT_MODEL: &str = "gpt-6-sol";
 
 /// Appended to `/models` as the `client_version` query parameter. Taken from the
 /// most recent upstream release tag, because the repo checkout itself carries
 /// `0.0.0` (the real version is only substituted at release time).
-pub const DEFAULT_CLIENT_VERSION: &str = "0.154.0";
+pub const DEFAULT_CLIENT_VERSION: &str = "0.156.1";
 
 /// Builds an `input` array holding a single user message.
 ///
