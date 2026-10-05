@@ -153,7 +153,7 @@ weil `wire::Event` sich noch bewegt.
 ### Womit spreche ich? — `/wire/v1/info`
 
 ```json
-{ "service": "codex-api-wrapper", "version": "1.4.1" }
+{ "service": "codex-api-wrapper", "version": "1.10.1" }
 ```
 
 Mehr nicht, und das ist Absicht:
@@ -180,6 +180,12 @@ tragen je ein `instructions_template` von ~17 KB — 169 KB für eine Liste, die
 meist einen Auswahldialog füllt — und der Katalog stimmt an mehreren Stellen nicht
 mit dem Verhalten überein. Beides gehört nicht in den Vertrag eines Konsumenten.
 Wer die Rohdaten braucht, hängt **`?raw=true`** an.
+
+Die Modellabfrage sendet standardmäßig `client_version=0.160.1`. Diese Kennung
+ist in `DEFAULT_CLIENT_VERSION` gepinnt und muss bei neuen Modell-Releases mit
+dem aktuellen Codex-Release abgeglichen werden. Die eingebundenen Codex-Crates
+bleiben auf dem in `CODEX_REV` gepinnten Stand. Für eine gezielte Prüfung
+akzeptiert `/wire/v1/models` auch `?client_version=...`.
 
 ```json
 {
@@ -297,7 +303,7 @@ budgetiert. Die Variante ist eine **Budgetempfehlung**, keine Fähigkeit, die wi
 zuschalten. Der Suffix wird vor dem Senden abgeschnitten — deshalb sind `id` und
 `model` im Wire-Katalog getrennt.
 
-**Nur für aktuelles und vorheriges Sol.** Berechtigt wären mehrere Modelle (`max > default`), aber
+**Nur für die bisher vermessenen Sol-Modelle.** Berechtigt wären mehrere Modelle (`max > default`), aber
 eine Variante verdoppelt einen Eintrag im Modellwähler für null funktionalen
 Unterschied. Sol ist das Arbeitspferd; für alles andere liefert
 `/wire/v1/models` `max_context_length`, und wer ein anderes Modell mit 872 000 fahren will,

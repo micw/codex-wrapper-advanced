@@ -63,8 +63,8 @@ const MAX_CONTEXT_CAPS: &[(&str, i64)] = &[("gpt-5.4", 872_000)];
 ///
 /// Six models would qualify by `max > default`, but a variant doubles a picker
 /// entry for **no functional difference** — both ids produce byte-identical
-/// requests, since the daemon sends no context field at all. Current and previous
-/// Sol are the workhorses; for everything else `/wire/v1/models` carries
+/// requests, since the daemon sends no context field at all. The measured Sol
+/// models get variants; for everything else `/wire/v1/models` carries
 /// `max_context_length` and a consumer can budget it itself.
 const LONG_VARIANTS: &[&str] = &["gpt-6-sol", "gpt-5.6-sol"];
 
@@ -352,7 +352,7 @@ mod tests {
     /// The variant is a budget label, so it exists only where it buys something
     /// and only for the model people actually run.
     #[test]
-    fn current_and_previous_sol_get_long_variants() {
+    fn measured_sol_models_get_long_variants() {
         let list = openai_list(&models());
         let data = &list["data"];
 
