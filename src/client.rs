@@ -575,6 +575,10 @@ impl Client {
     }
 }
 
+#[cfg(test)]
+#[path = "client_retry_tests.rs"]
+mod retry_tests;
+
 // --- Event translation -----------------------------------------------------
 
 /// Maps `ResponseEvent` onto [`Event`].
@@ -591,9 +595,15 @@ fn map_events(
         let events = match item {
             Ok(event) => map_one(event, &state),
             Err(err) => {
+                // Preserve the upstream variant before conversion to display-only error text.
+                let upstream_retryable = matches!(
+                    &err,
+                    codex_api::ApiError::Retryable { .. }
+                        | codex_api::ApiError::RateLimitExceeded { .. }
+                );
                 let error = UpstreamError::from(err);
                 vec![Event::Failed {
-                    retryable: matches!(error.status, Some(429 | 503)),
+                    retryable: upstream_retryable || matches!(error.status, Some(429 | 503)),
                     message: error.message,
                 }]
             }
