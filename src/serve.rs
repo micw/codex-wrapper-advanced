@@ -106,6 +106,9 @@ fn request_json<T: serde::de::DeserializeOwned>(
     })
 }
 
+#[path = "image_api.rs"]
+mod image_api;
+
 #[derive(Clone)]
 struct AppState {
     client: Client,
@@ -169,7 +172,9 @@ pub async fn run(config: ServeConfig) -> Result<()> {
     let openai_api = Router::new()
         .route("/models", get(openai_models))
         .route("/chat/completions", post(openai_chat_completions))
-        .route("/responses", post(openai_responses));
+        .route("/responses", post(openai_responses))
+        .route("/images/generations", post(image_api::generate))
+        .route("/images/edits", post(image_api::edit));
 
     let app = Router::new()
         .route("/health", get(health))

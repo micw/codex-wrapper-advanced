@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.11.0
+
+- Add authenticated OpenAI-compatible `POST /v1/images/generations` and multipart `POST /v1/images/edits`, using the official Codex Images client and existing subscription login.
+- Support the statically declared `gpt-image-2` route, base64 image responses, bounded raster uploads/results, and explicit parameter validation. Masks, remote image references, URL output, and streaming image responses are not supported.
+- Leave `/v1/models` and wire v1 unchanged: the model catalog remains chat-only; there is no image-discovery endpoint.
+- Do not automatically retry image requests after timeouts, transport failures, or server errors. An explicit authentication rejection may refresh credentials through the existing recovery path.
+- Update the pinned Codex libraries to 0.165.0, Rust to 1.99.1, and compatible dependency versions in a separate dependency commit. Preserve upstream Rama alpha versions required for API compatibility and use upstream plan display names.
+- Add offline request serialization, authorization, input/output bounds, and transport retry regression coverage.
+
 ## 1.10.2
 
 - Preserve structured upstream `ApiError::Retryable` and `RateLimitExceeded` errors as wire `failed` events with `retryable: true`. Previously these errors could lose their classification during display-message conversion and incorrectly appear terminal to consumers.

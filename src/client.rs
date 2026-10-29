@@ -54,6 +54,9 @@ const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(900);
 const MAX_MODEL_CATALOG_BYTES: usize = 1024 * 1024;
 
+#[path = "images_client.rs"]
+mod images;
+
 // --- Auth provider ---------------------------------------------------------
 
 /// Connects the `AuthManager` to `codex_api`'s `AuthProvider` trait.

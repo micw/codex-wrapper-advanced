@@ -952,3 +952,45 @@ Bindet `openai/codex` (Apache-2.0) per Pfad ein. Apache §6 verbietet Markennutz
 — bei einer Veröffentlichung darf „Codex" nicht im Produktnamen stehen und
 NOTICE/Attribution müssen mit. Für einen lokalen PoC nicht relevant, für alles
 danach schon.
+
+## Image API
+
+`POST /v1/images/generations` accepts an OpenAI-style JSON request. `POST
+/v1/images/edits` accepts standard `multipart/form-data`, with one to five uploaded
+`image` or `image[]` fields and string parameter fields. Both endpoints use the
+same configured API keys and managed ChatGPT authentication as the existing API.
+No image models are added to `/v1/models`, and there is no image wire endpoint.
+
+The only supported model is `gpt-image-2`, also the explicit default. Supported
+parameters are `prompt` (required), `model`, `n` (1–4), `quality` (`auto`, `low`,
+`medium`, `high`), `background` (`auto`, `opaque`, `transparent`), and `size`
+(`auto`, `1024x1024`, `1536x1024`, `1024x1536`). Optional `response_format` must be
+`b64_json`. Parameters are forwarded without silent changes; unknown parameters,
+URL responses, masks, remote references, and JSON edit bodies are rejected.
+Reference uploads must contain PNG, JPEG, WebP, or GIF raster headers; filenames
+and declared MIME types are not trusted. Header validation is not a full image
+codec or malware scanner.
+
+```sh
+curl -H "Authorization: Bearer $WRAPPER_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"A watercolor fox", "model":"gpt-image-2", "n":1}' \
+  http://localhost:8080/v1/images/generations
+
+curl -H "Authorization: Bearer $WRAPPER_API_KEY" \
+  -F 'prompt=Add a red scarf' -F 'image=@reference.png' \
+  http://localhost:8080/v1/images/edits
+```
+
+Responses contain `created` and `data[].b64_json`, preserve typed optional
+`generation_id`, `background`, `quality`, and `size` metadata, and do not invent
+usage or output-format information. Successful responses carry a wrapper
+`x-request-id` and, when supplied upstream, `x-codex-imagegen-request-id`.
+Base64 and raster headers are validated before returning images. Requests retain
+the server's 32 MiB body limit; each reference or decoded result is limited to
+20 MiB, decoded results to 64 MiB total, and the complete upstream and public JSON
+responses to 32 MiB. The encoded response limit may be reached before the decoded
+limits. Image requests have a 180-second upstream timeout. Only an explicit
+upstream 401 can invoke existing authentication recovery; transport failures,
+429s, and server errors are never automatically retried. A timed-out generation
+may already have been processed or charged, so callers must not blindly retry.
