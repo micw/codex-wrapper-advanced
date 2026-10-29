@@ -84,11 +84,12 @@ fn apply_auth_headers(auth: &CodexAuth, headers: &mut HeaderMap) {
 }
 
 impl AuthProvider for ManagedChatGptAuth {
-    fn add_auth_headers(&self, headers: &mut HeaderMap) {
+    fn add_auth_headers(&self, headers: &mut HeaderMap) -> Result<(), AuthError> {
         // Synchronous path (telemetry): cache only, no refresh.
         if let Some(auth) = self.manager.auth_cached() {
             apply_auth_headers(&auth, headers);
         }
+        Ok(())
     }
 
     fn resolve_auth_headers(&self) -> AuthHeadersFuture<'_> {
@@ -395,7 +396,7 @@ impl From<codex_api::ApiError> for UpstreamError {
                 message,
                 body: None,
             },
-            E::ServerOverloaded => Self {
+            E::ServerOverloaded { .. } => Self {
                 status: Some(503),
                 message: "server overloaded".to_string(),
                 body: None,

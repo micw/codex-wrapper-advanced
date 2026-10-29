@@ -6,7 +6,7 @@
 # would be reproducible — upstream releases fast and the prompt/model data moves
 # with it.
 
-ARG RUST_VERSION=1.95
+ARG RUST_VERSION=1.99.1
 ARG DEBIAN_RELEASE=trixie
 
 # --- Build -----------------------------------------------------------------

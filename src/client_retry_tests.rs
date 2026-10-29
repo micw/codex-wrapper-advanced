@@ -18,7 +18,7 @@ async fn structured_retryable_processing_error_remains_retryable_on_the_wire() {
     assert_eq!(
         failure(ApiError::Retryable {
             message: message.into(),
-            delay: Some(Duration::from_secs(2)),
+            retry_after: codex_http_client::RetryAfter::from_delay(Duration::from_secs(2)),
         })
         .await,
         serde_json::json!({
@@ -34,7 +34,7 @@ async fn structured_rate_limit_delay_remains_retryable_without_a_fabricated_http
     assert_eq!(
         failure(ApiError::RateLimitExceeded {
             message: "temporarily rate limited".into(),
-            delay: Some(Duration::from_secs(3)),
+            retry_after: codex_http_client::RetryAfter::from_delay(Duration::from_secs(3)),
         })
         .await,
         serde_json::json!({

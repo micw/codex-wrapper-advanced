@@ -581,7 +581,7 @@ mod tests {
         );
         assert_eq!(
             report.account.plan.as_ref().unwrap().name.as_deref(),
-            Some("Pro Lite")
+            Some("Pro")
         );
         assert_eq!(report.promo, None);
     }
@@ -635,7 +635,7 @@ mod tests {
     #[test]
     fn an_unknown_plan_gets_no_name() {
         let resolved = plan("prolite".to_string());
-        assert_eq!(resolved.name.as_deref(), Some("Pro Lite"));
+        assert_eq!(resolved.name.as_deref(), Some("Pro"));
 
         let unknown = plan("tarif-von-morgen".to_string());
         assert_eq!(unknown.id, "tarif-von-morgen");
