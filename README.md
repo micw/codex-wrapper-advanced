@@ -237,14 +237,18 @@ anheben**. Deshalb genau ein Eintrag:
 |---|---:|---:|---|
 | `gpt-5.4` | 1 000 000 | **872 000** | ~950 000 wurde abgelehnt; 872 000 ist der von derselben Stufe deklarierte und auf vier Modellen bestätigte Wert |
 
-Alle übrigen behalten ihre Katalogangabe: die 872k-Gruppe ist an ihrem Maximum
-geprüft, `gpt-5.5` hält seine 272 000 nachweislich ein, und `gpt-5.4-mini` wie
-Spark haben `max == default`, also keinen Spielraum.
+Alle übrigen behalten ihre Katalogangabe: `gpt-6.1-sol` nahm am 2026-10-06
+872 060 Input-Tokens an. Ein synthetischer Grenztest nahm 921 858 Input-Tokens
+an und lehnte 921 859 mit `context window exceeded` ab; diese Grenze gilt nur
+für den getesteten Request, nicht pauschal für beliebige Instructions und Tools.
+Die veröffentlichte Long-Variante bleibt deshalb beim Katalogwert 872 000.
+`gpt-5.5` hält seine 272 000 nachweislich ein, und `gpt-5.4-mini` wie Spark
+haben `max == default`, also keinen Spielraum.
 
 #### Reasoning
 
 `reasoning.levels` ist die **korrigierte** Liste, nicht die des Katalogs — `ultra`
-entfernt, `none` ergänzt außer bei `gpt-6-astra` (Messdaten unter
+entfernt, `none` ergänzt außer bei `gpt-6-astra` und `gpt-6.1-sol` (Messdaten unter
 „OpenAI-kompatibel"). `default` ist der Vorgabewert des
 Backends und bleibt unangetastet; er kann außerhalb von `levels` liegen, wenn das
 Backend seine eigene Liste verletzt.
@@ -292,6 +296,8 @@ und was möglich ist. Ausgedrückt wird das hier als zweiter Eintrag:
 
 | `id` | `model` (ans Backend) | `context_length` |
 |---|---|---:|
+| `gpt-6.1-sol` | `gpt-6.1-sol` | 272 000 |
+| `gpt-6.1-sol:long` | `gpt-6.1-sol` | 872 000 |
 | `gpt-6-sol` | `gpt-6-sol` | 272 000 |
 | `gpt-6-sol:long` | `gpt-6-sol` | 872 000 |
 | `gpt-5.6-sol` | `gpt-5.6-sol` | 272 000 |
@@ -322,8 +328,8 @@ Subscription-Endpoint am 2026-09-24 gemessen. Umgekehrt fehlt `none`, das bei So
 und Luna angenommen wird und das Denken abschaltet (`reasoning_output_tokens: 0`). Ein Modellwähler, der
 sich direkt aus dem Katalog speist, böte also einen Wert an, der nicht wählbar
 ist, und verschwiege den schnellsten. Deshalb fliegt `ultra` raus und `none`
-kommt dazu — letzteres **außer bei `gpt-6-astra`**, das `none` nachweislich
-ablehnt. Alle drei Listen stehen als Konstante mit Messdatum
+kommt dazu — letzteres **außer bei `gpt-6-astra` und `gpt-6.1-sol`**, die
+`none` nachweislich ablehnen. Alle drei Listen stehen als Konstante mit Messdatum
 in [src/models.rs](src/models.rs). Nicht ergänzt wird `minimal` — das Backend nennt
 es in seiner allgemeinen Fehlermeldung, lehnt es für diese Modelle aber
 ausdrücklich ab.

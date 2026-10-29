@@ -44,10 +44,9 @@ const UNADVERTISED_REASONING_LEVEL: &str = "none";
 
 /// Models that reject [`UNADVERTISED_REASONING_LEVEL`].
 ///
-/// `gpt-6-astra` rejects `none`; advertised and accepted already agree once
-/// `ultra` is removed. Keyed by slug because no catalogue capability describes
-/// support for disabling reasoning.
-const NONE_UNSUPPORTED_MODELS: &[&str] = &["gpt-6-astra", "gpt-5.3-codex-spark"];
+/// `gpt-6.1-sol` rejects `none` as of 2026-10-06. Keyed by slug because no
+/// catalogue capability describes support for disabling reasoning.
+const NONE_UNSUPPORTED_MODELS: &[&str] = &["gpt-6-astra", "gpt-6.1-sol", "gpt-5.3-codex-spark"];
 
 /// Caps on `max_context_window` where the catalogue over-promises.
 ///
@@ -61,12 +60,13 @@ const MAX_CONTEXT_CAPS: &[(&str, i64)] = &[("gpt-5.4", 872_000)];
 
 /// Models that get a second `/v1/models` entry for the larger budget.
 ///
-/// Six models would qualify by `max > default`, but a variant doubles a picker
-/// entry for **no functional difference** — both ids produce byte-identical
-/// requests, since the daemon sends no context field at all. The measured Sol
-/// models get variants; for everything else `/wire/v1/models` carries
-/// `max_context_length` and a consumer can budget it itself.
-const LONG_VARIANTS: &[&str] = &["gpt-6-sol", "gpt-5.6-sol"];
+/// A variant doubles a picker entry for **no functional difference** — both ids
+/// produce byte-identical requests, since the daemon sends no context field.
+/// The measured Sol models get variants; for everything else `/wire/v1/models`
+/// carries `max_context_length` and a consumer can budget it itself.
+/// `gpt-6.1-sol` accepted 872,060 input tokens on 2026-10-06; the published
+/// 872,000-token budget stays at the catalogue's declared ceiling.
+const LONG_VARIANTS: &[&str] = &["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"];
 
 /// Separator between model and variant. Matches the house convention on the
 /// Claude side (`opus:high`).
@@ -353,9 +353,26 @@ mod tests {
     /// and only for the model people actually run.
     #[test]
     fn measured_sol_models_get_long_variants() {
-        let list = openai_list(&models());
+        let mut models = models();
+        let mut six_one = models[1].clone();
+        six_one["slug"] = json!("gpt-6.1-sol");
+        six_one["display_name"] = json!("GPT-6.1-Sol");
+        models.push(six_one);
+        let list = openai_list(&models);
         let data = &list["data"];
 
+        assert_eq!(
+            find(data, "gpt-6.1-sol").unwrap()["context_length"],
+            272_000
+        );
+        assert_eq!(
+            find(data, "gpt-6.1-sol:long").unwrap()["context_length"],
+            872_000
+        );
+        assert_eq!(
+            find(data, "gpt-6.1-sol").unwrap()["reasoning_levels"],
+            json!(["low", "medium", "high", "xhigh", "max"])
+        );
         assert_eq!(find(data, "gpt-6-sol").unwrap()["context_length"], 272_000);
         assert_eq!(
             find(data, "gpt-6-sol:long").unwrap()["context_length"],
@@ -382,6 +399,8 @@ mod tests {
     /// requests are byte-identical.
     #[test]
     fn the_variant_suffix_is_stripped_for_the_backend() {
+        assert_eq!(wire_model("gpt-6.1-sol:long"), "gpt-6.1-sol");
+        assert_eq!(wire_model("gpt-6.1-sol"), "gpt-6.1-sol");
         assert_eq!(wire_model("gpt-6-sol:long"), "gpt-6-sol");
         assert_eq!(wire_model("gpt-6-sol"), "gpt-6-sol");
         assert_eq!(wire_model("gpt-5.6-sol:long"), "gpt-5.6-sol");
