@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.12.1
+
+- Limit projected `/wire/v1/models` input modalities to the intersection of the backend declaration and the wrapper-supported text/image surface. Do not advertise audio or unknown future modalities, and do not invent absent capabilities.
+- Add offline regression coverage for GPT-6.2 Sol's live text/image/audio metadata while preserving its 500,000/872,000 context values and reasoning metadata; keep Astra unchanged.
+- Leave raw catalogue diagnostics, permissive wire/Responses transport, authentication, Codex pins, dependencies, and long-context aliases unchanged. Raw pass-through does not imply support for all backend modalities across wrapper surfaces.
+
 ## 1.12.0
 
 - Upgrade the pinned official Codex libraries and model-catalogue client version to stable 0.169.1, including matching websocket fork pins and lockfile.

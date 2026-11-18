@@ -155,7 +155,7 @@ weil `wire::Event` sich noch bewegt.
 ### Womit spreche ich? — `/wire/v1/info`
 
 ```json
-{ "service": "codex-api-wrapper", "version": "1.12.0" }
+{ "service": "codex-api-wrapper", "version": "1.12.1" }
 ```
 
 Mehr nicht, und das ist Absicht:
@@ -181,7 +181,8 @@ Eine schlanke Projektion in unserem Vokabular, kein Durchreicher. Die Rohobjekte
 tragen je ein `instructions_template` von ~17 KB — 169 KB für eine Liste, die
 meist einen Auswahldialog füllt — und der Katalog stimmt an mehreren Stellen nicht
 mit dem Verhalten überein. Beides gehört nicht in den Vertrag eines Konsumenten.
-Wer die Rohdaten braucht, hängt **`?raw=true`** an.
+Raw backend model metadata is available through the `models` CLI command;
+`/wire/v1/models` always returns the wrapper projection.
 
 Die Modellabfrage sendet standardmäßig `client_version=0.169.1`. Diese Kennung
 ist in `DEFAULT_CLIENT_VERSION` gepinnt und muss bei neuen Modell-Releases mit
@@ -214,6 +215,20 @@ akzeptiert `/wire/v1/models` auch `?client_version=...`.
 **`id` und `model` sind getrennt**, auch wenn sie hier gleich sind: `id` ist der
 Schlüssel, den ein Konsument wählt, `model` der Name, der ans Backend geht. Auf
 der OpenAI-Oberfläche laufen sie auseinander (s.u.).
+
+#### Supported input modalities
+
+The projected `/wire/v1/models` catalogue advertises the intersection of each
+backend model's declared `input_modalities` with the wrapper-supported text/image
+surface. Audio and unknown future modalities are not advertised; absent declarations
+do not gain text or image support. This is a capability ceiling, not the raw backend
+catalogue: for example, GPT-6.2 Sol's live `["text", "image", "audio"]` becomes
+`["text", "image"]`, without changing its context or reasoning metadata.
+
+This does not add input validation or change transport behavior. Wire input items
+are raw Responses JSON, and the Responses adapter can pass unknown content parts
+through, whereas Chat Completions explicitly supports text/image parts only.
+Pass-through is not a promise of supported audio handling across wrapper surfaces.
 
 #### Die beiden Kontextwerte
 

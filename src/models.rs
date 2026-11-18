@@ -93,7 +93,7 @@ pub fn wire_model(id: &str) -> &str {
         .map_or(id, |(model, _variant)| model)
 }
 
-/// `GET /wire/v1/models` — every model, nothing filtered.
+/// `GET /wire/v1/models` — every model, with wrapper-supported capabilities.
 pub fn catalogue(models: &[Value]) -> Value {
     json!({ "models": models.iter().map(entry).collect::<Vec<_>>() })
 }
@@ -109,7 +109,7 @@ fn entry(model: &Value) -> Value {
         "display_name": model.get("display_name").and_then(Value::as_str),
         "description": model.get("description").and_then(Value::as_str),
         "hidden": model.get("visibility").and_then(Value::as_str) != Some("list"),
-        "input_modalities": model.get("input_modalities").cloned().unwrap_or(json!([])),
+        "input_modalities": input_modalities(model),
         "default_context_length": context_default(model),
         "max_context_length": context_max(model),
         "reasoning": {
@@ -122,6 +122,21 @@ fn entry(model: &Value) -> Value {
                 .unwrap_or(true),
         },
     })
+}
+
+/// Advertise only declared modalities supported by the wrapper's input contract.
+///
+/// Raw wire/Responses items can pass through other types; that does not promise
+/// wrapper support for audio or future backend modalities.
+fn input_modalities(model: &Value) -> Vec<&str> {
+    model
+        .get("input_modalities")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|modality| matches!(*modality, "text" | "image"))
+        .collect()
 }
 
 /// What Codex itself runs with.
@@ -340,12 +355,15 @@ mod tests {
 
     #[test]
     fn six_two_catalogue_preserves_declared_capabilities_without_inventing_none() {
-        // Minimal projections of the official rust-v0.169.1 bundled catalogue.
-        // No subscription calls or speculative long-context aliases are needed.
-        for (slug, context) in [("gpt-6.2-sol", 500_000), ("gpt-6.2-astra", 272_000)] {
+        // Sol's live catalogue adds audio to the bundled rust-v0.169.1 metadata.
+        // Astra remains text/image. No subscription calls or new aliases needed.
+        for (slug, context, modalities) in [
+            ("gpt-6.2-sol", 500_000, json!(["text", "image", "audio"])),
+            ("gpt-6.2-astra", 272_000, json!(["text", "image"])),
+        ] {
             let model = json!({
                 "slug": slug, "visibility": "list",
-                "input_modalities": ["text", "image"],
+                "input_modalities": modalities,
                 "context_window": context, "max_context_window": 872_000,
                 "default_reasoning_level": "low",
                 "supports_reasoning_summary_parameter": true,
@@ -369,6 +387,29 @@ mod tests {
             assert_eq!(list["data"][0]["id"], slug);
             assert_eq!(wire_model(slug), slug);
         }
+    }
+
+    #[test]
+    fn input_modalities_are_a_supported_intersection_not_a_default() {
+        for (declared, expected) in [
+            (json!(["audio", "video", "future"]), json!([])),
+            (json!(["image", "audio"]), json!(["image"])),
+            (json!(["text", "future"]), json!(["text"])),
+            (json!([]), json!([])),
+            (Value::Null, json!([])),
+            (json!("text"), json!([])),
+            (json!([null, 42, "text"]), json!(["text"])),
+        ] {
+            let model = json!({"input_modalities": declared});
+            assert_eq!(
+                catalogue(&[model])["models"][0]["input_modalities"],
+                expected
+            );
+        }
+        assert_eq!(
+            catalogue(&[json!({})])["models"][0]["input_modalities"],
+            json!([])
+        );
     }
 
     #[test]
