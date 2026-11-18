@@ -46,7 +46,16 @@ const UNADVERTISED_REASONING_LEVEL: &str = "none";
 ///
 /// `gpt-6.1-sol` rejects `none` as of 2026-10-06. Keyed by slug because no
 /// catalogue capability describes support for disabling reasoning.
-const NONE_UNSUPPORTED_MODELS: &[&str] = &["gpt-6-astra", "gpt-6.1-sol", "gpt-5.3-codex-spark"];
+// New releases must not inherit a measured capability from older models.
+// GPT-6.2's bundled catalogue advertises low through ultra, not none. Honour
+// an explicitly advertised none in the future, but do not synthesize it here.
+const NONE_UNSUPPORTED_MODELS: &[&str] = &[
+    "gpt-6-astra",
+    "gpt-6.1-sol",
+    "gpt-5.3-codex-spark",
+    "gpt-6.2-sol",
+    "gpt-6.2-astra",
+];
 
 /// Caps on `max_context_window` where the catalogue over-promises.
 ///
@@ -327,6 +336,39 @@ mod tests {
             reasoning_levels(old_sol),
             ["none", "low", "medium", "high", "xhigh", "max"]
         );
+    }
+
+    #[test]
+    fn six_two_catalogue_preserves_declared_capabilities_without_inventing_none() {
+        // Minimal projections of the official rust-v0.169.1 bundled catalogue.
+        // No subscription calls or speculative long-context aliases are needed.
+        for (slug, context) in [("gpt-6.2-sol", 500_000), ("gpt-6.2-astra", 272_000)] {
+            let model = json!({
+                "slug": slug, "visibility": "list",
+                "input_modalities": ["text", "image"],
+                "context_window": context, "max_context_window": 872_000,
+                "default_reasoning_level": "low",
+                "supports_reasoning_summary_parameter": true,
+                "supported_reasoning_levels": [
+                    {"effort": "low"}, {"effort": "medium"}, {"effort": "high"},
+                    {"effort": "xhigh"}, {"effort": "max"}, {"effort": "ultra"}
+                ]
+            });
+            let projected = catalogue(std::slice::from_ref(&model));
+            let entry = &projected["models"][0];
+            assert_eq!(entry["default_context_length"], context);
+            assert_eq!(entry["max_context_length"], 872_000);
+            assert_eq!(
+                entry["reasoning"]["levels"],
+                json!(["low", "medium", "high", "xhigh", "max"])
+            );
+            assert_eq!(entry["reasoning"]["default"], "low");
+            assert_eq!(entry["input_modalities"], json!(["text", "image"]));
+            let list = openai_list(&[model]);
+            assert_eq!(list["data"].as_array().unwrap().len(), 1);
+            assert_eq!(list["data"][0]["id"], slug);
+            assert_eq!(wire_model(slug), slug);
+        }
     }
 
     #[test]

@@ -113,6 +113,7 @@ async fn typed_generation_and_edit_forward_expected_backend_json() {
                     image_url: inline.clone(),
                 }],
                 prompt: request.prompt.clone(),
+                output: request.output,
                 model: request.model.clone(),
                 n: request.n,
                 quality: request.quality,
@@ -126,6 +127,8 @@ async fn typed_generation_and_edit_forward_expected_backend_json() {
     let requests = transport.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
     let expected = serde_json::to_value(&request).unwrap();
+    assert!(expected.get("output_format").is_none());
+    assert!(expected.get("gif_options").is_none());
     assert_eq!(
         requests[0].url,
         "https://backend.invalid/codex/images/generations"

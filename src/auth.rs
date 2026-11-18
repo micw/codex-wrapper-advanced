@@ -52,7 +52,10 @@ pub fn home() -> Result<PathBuf> {
 /// directory leaves nothing behind in a keyring.
 const STORE_MODE: AuthCredentialsStoreMode = AuthCredentialsStoreMode::File;
 
-const AUTH_LOCK_FILE: &str = "auth.lock";
+// Upstream 0.169.1 uses auth.lock internally for storage commits. A separate
+// transaction lock avoids re-entering that non-reentrant OS lock on refresh.
+// Migrations from <=1.11 must not overlap credential owners using the old name.
+const AUTH_LOCK_FILE: &str = "wrapper-auth.lock";
 
 /// Process-wide ownership of the credential store.
 ///

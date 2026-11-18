@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.12.0
+
+- Upgrade the pinned official Codex libraries and model-catalogue client version to stable 0.169.1, including matching websocket fork pins and lockfile.
+- Support discovery of GPT-6.2 Sol and Astra without inventing `none` reasoning support or unmeasured long-context aliases; keep context capabilities backend-driven and the default request model unchanged.
+- Adapt the upstream async authentication API while preserving session headers, bounded auth recovery, and existing image request/output semantics.
+- Rename the wrapper credential transaction lock to `wrapper-auth.lock` to avoid self-deadlock with upstream's new internal `auth.lock`. **Upgrading from <=1.11 requires a drained stop-before-start transition; do not overlap old/new processes sharing credentials.** See [UPSTREAM-UPGRADE.md](UPSTREAM-UPGRADE.md).
+- Add keyless GPT-6.2 catalogue and raster serialization regression coverage.
+
 ## 1.11.0
 
 - Add authenticated OpenAI-compatible `POST /v1/images/generations` and multipart `POST /v1/images/edits`, using the official Codex Images client and existing subscription login.

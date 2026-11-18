@@ -62,6 +62,8 @@ impl Parameters {
         }
         Ok(ImageGenerationRequest {
             prompt: self.prompt,
+            // Keep the existing raster-only API; do not opt into upstream GIF output.
+            output: None,
             model,
             background: self.background,
             n: self.n,

@@ -46,6 +46,7 @@ impl Client {
                     client.edit(&ImageEditRequest {
                         images,
                         prompt: generation.prompt,
+                        output: generation.output,
                         background: generation.background,
                         model: generation.model,
                         n: generation.n,

@@ -95,14 +95,18 @@ impl AuthProvider for ManagedChatGptAuth {
         Ok(())
     }
 
-    fn resolve_auth_headers(&self) -> AuthHeadersFuture<'_> {
+    fn apply_auth_headers(&self, mut headers: HeaderMap) -> AuthHeadersFuture<'_> {
         Box::pin(async move {
             let auth = crate::auth::coordinated_auth(&self.manager)
                 .await
                 .map_err(|error| AuthError::Build(error.to_string()))?
                 .ok_or_else(|| AuthError::Build("not signed in".to_string()))?;
             self.tracker.record(&auth);
-            let mut headers = HeaderMap::new();
+            // Preserve caller/session headers, but never retain stale credentials
+            // from an earlier request or a different account.
+            headers.remove(http::header::AUTHORIZATION);
+            headers.remove("ChatGPT-Account-ID");
+            headers.remove("X-OpenAI-Fedramp");
             apply_auth_headers(&auth, &mut headers);
             if !headers.contains_key(http::header::AUTHORIZATION) {
                 return Err(AuthError::Build(

@@ -87,9 +87,11 @@ Zwei Stolpersteine, beide schon gelöst, aber wartungsrelevant:
   über Workspace-Grenzen, und `codex-api` braucht ein `proxy`-Feature, das nur
   OpenAIs `tokio-tungstenite`-Fork hat. Ohne den Block scheitert schon die
   Abhängigkeitsauflösung.
-- **Toolchain:** `../codex/codex-rs/rust-toolchain.toml` pinnt 1.95.0. Ohne
-  `rustup` greift der Pin nicht; mit System-Rust 1.94.1 baut es. Mit `rustup` im
-  PATH wird 1.95.0 nachinstalliert.
+- **Toolchain:** upstream declares Rust 1.95.0. The wrapper's container uses
+  Rust 1.99.1; the 0.169.1 upgrade is tested with that same version. Building
+  from this directory does not automatically apply a sibling's toolchain file.
+  Use `cargo build --locked` after checking out the exact commit in `CODEX_REV`;
+  a shallow clone of today's default branch is not the pinned source.
 
 Beides ist der in §8.4 vorhergesagte „praktische Preis" — bei jedem
 Upstream-Update gegenprüfen.
@@ -153,7 +155,7 @@ weil `wire::Event` sich noch bewegt.
 ### Womit spreche ich? — `/wire/v1/info`
 
 ```json
-{ "service": "codex-api-wrapper", "version": "1.10.1" }
+{ "service": "codex-api-wrapper", "version": "1.12.0" }
 ```
 
 Mehr nicht, und das ist Absicht:
@@ -181,7 +183,7 @@ meist einen Auswahldialog füllt — und der Katalog stimmt an mehreren Stellen 
 mit dem Verhalten überein. Beides gehört nicht in den Vertrag eines Konsumenten.
 Wer die Rohdaten braucht, hängt **`?raw=true`** an.
 
-Die Modellabfrage sendet standardmäßig `client_version=0.160.1`. Diese Kennung
+Die Modellabfrage sendet standardmäßig `client_version=0.169.1`. Diese Kennung
 ist in `DEFAULT_CLIENT_VERSION` gepinnt und muss bei neuen Modell-Releases mit
 dem aktuellen Codex-Release abgeglichen werden. Die eingebundenen Codex-Crates
 bleiben auf dem in `CODEX_REV` gepinnten Stand. Für eine gezielte Prüfung
