@@ -1177,7 +1177,7 @@ dependencies = [
 
 [[package]]
 name = "codex-api-wrapper"
-version = "1.12.1"
+version = "1.12.2"
 dependencies = [
  "anyhow",
  "axum",

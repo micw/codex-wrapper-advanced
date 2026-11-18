@@ -71,11 +71,13 @@ const MAX_CONTEXT_CAPS: &[(&str, i64)] = &[("gpt-5.4", 872_000)];
 ///
 /// A variant doubles a picker entry for **no functional difference** — both ids
 /// produce byte-identical requests, since the daemon sends no context field.
-/// The measured Sol models get variants; for everything else `/wire/v1/models`
+/// Selected Sol models get variants; for everything else `/wire/v1/models`
 /// carries `max_context_length` and a consumer can budget it itself.
 /// `gpt-6.1-sol` accepted 872,060 input tokens on 2026-10-06; the published
 /// 872,000-token budget stays at the catalogue's declared ceiling.
-const LONG_VARIANTS: &[&str] = &["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"];
+/// GPT-6.2 Sol uses the official 0.169.1 catalogue's 500,000/872,000 budgets,
+/// not a new live long-context measurement.
+const LONG_VARIANTS: &[&str] = &["gpt-6.2-sol", "gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"];
 
 /// Separator between model and variant. Matches the house convention on the
 /// Claude side (`opus:high`).
@@ -95,7 +97,28 @@ pub fn wire_model(id: &str) -> &str {
 
 /// `GET /wire/v1/models` — every model, with wrapper-supported capabilities.
 pub fn catalogue(models: &[Value]) -> Value {
-    json!({ "models": models.iter().map(entry).collect::<Vec<_>>() })
+    let mut entries = Vec::new();
+    for model in models {
+        let base = entry(model);
+        entries.push(base.clone());
+        // Older variants are synthesized by existing consumers. Publish only the
+        // newly requested Sol variant explicitly so they can discover it now.
+        if base["id"] == "gpt-6.2-sol"
+            && let Some(max) = long_variant(model)
+        {
+            let mut long = base;
+            long["id"] = json!(format!("gpt-6.2-sol{VARIANT_SEPARATOR}{LONG_SUFFIX}"));
+            long["default_context_length"] = json!(max);
+            long["max_context_length"] = json!(max);
+            let name = model
+                .get("display_name")
+                .and_then(Value::as_str)
+                .unwrap_or("gpt-6.2-sol");
+            long["display_name"] = json!(format!("{name} (Long context)"));
+            entries.push(long);
+        }
+    }
+    json!({ "models": entries })
 }
 
 fn entry(model: &Value) -> Value {
@@ -356,7 +379,7 @@ mod tests {
     #[test]
     fn six_two_catalogue_preserves_declared_capabilities_without_inventing_none() {
         // Sol's live catalogue adds audio to the bundled rust-v0.169.1 metadata.
-        // Astra remains text/image. No subscription calls or new aliases needed.
+        // Astra remains text/image. No subscription calls are needed.
         for (slug, context, modalities) in [
             ("gpt-6.2-sol", 500_000, json!(["text", "image", "audio"])),
             ("gpt-6.2-astra", 272_000, json!(["text", "image"])),
@@ -382,10 +405,76 @@ mod tests {
             );
             assert_eq!(entry["reasoning"]["default"], "low");
             assert_eq!(entry["input_modalities"], json!(["text", "image"]));
+            let expected_count = if slug == "gpt-6.2-sol" { 2 } else { 1 };
+            assert_eq!(
+                projected["models"].as_array().unwrap().len(),
+                expected_count
+            );
+            assert_eq!(entry["id"], slug);
+            if slug == "gpt-6.2-sol" {
+                let long = find(&projected["models"], "gpt-6.2-sol:long").unwrap();
+                assert_eq!(long["model"], slug);
+                assert_eq!(long["default_context_length"], 872_000);
+                assert_eq!(long["max_context_length"], 872_000);
+                assert_eq!(long["display_name"], "gpt-6.2-sol (Long context)");
+                for field in ["hidden", "input_modalities", "reasoning"] {
+                    assert_eq!(long[field], entry[field]);
+                }
+            }
+            let list = openai_list(&[model]);
+            assert_eq!(list["data"].as_array().unwrap().len(), expected_count);
+            assert_eq!(list["data"][0]["id"], slug);
+            assert_eq!(list["data"][0]["context_length"], context);
+            if slug == "gpt-6.2-sol" {
+                let long = find(&list["data"], "gpt-6.2-sol:long").unwrap();
+                assert_eq!(long["context_length"], 872_000);
+                assert_eq!(
+                    long["reasoning_levels"],
+                    list["data"][0]["reasoning_levels"]
+                );
+                assert_eq!(wire_model("gpt-6.2-sol:long"), wire_model(slug));
+            }
+            assert_eq!(wire_model(slug), slug);
+        }
+    }
+
+    #[test]
+    fn explicit_wire_long_uses_declared_budget_and_preserves_visibility() {
+        let model = json!({
+            "slug": "gpt-6.2-sol", "display_name": "Sol", "visibility": "hide",
+            "context_window": 400_000, "max_context_window": 700_000,
+            "input_modalities": ["image", "audio"]
+        });
+        let wire = catalogue(&[model]);
+        let long = find(&wire["models"], "gpt-6.2-sol:long").unwrap();
+        assert_eq!(long["default_context_length"], 700_000);
+        assert_eq!(long["max_context_length"], 700_000);
+        assert_eq!(long["model"], "gpt-6.2-sol");
+        assert_eq!(long["hidden"], true);
+        assert_eq!(long["display_name"], "Sol (Long context)");
+        assert_eq!(long["input_modalities"], json!(["image"]));
+        let old = catalogue(&models());
+        assert!(
+            old["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| !entry["id"].as_str().unwrap().contains(':'))
+        );
+    }
+
+    #[test]
+    fn six_two_long_variant_requires_declared_headroom() {
+        for max in [499_999, 500_000] {
+            let model = json!({
+                "slug": "gpt-6.2-sol", "visibility": "list",
+                "context_window": 500_000, "max_context_window": max,
+            });
+            let wire = catalogue(std::slice::from_ref(&model));
+            assert_eq!(wire["models"].as_array().unwrap().len(), 1);
             let list = openai_list(&[model]);
             assert_eq!(list["data"].as_array().unwrap().len(), 1);
-            assert_eq!(list["data"][0]["id"], slug);
-            assert_eq!(wire_model(slug), slug);
+            assert!(find(&list["data"], "gpt-6.2-sol:long").is_none());
         }
     }
 

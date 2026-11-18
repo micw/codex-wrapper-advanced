@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.12.2
+
+- Add `gpt-6.2-sol:long` to `/v1/models` with the official pinned Codex catalogue's declared 872,000-token maximum; the base model keeps its declared 500,000-token default. These are provider metadata, not a new live wrapper measurement.
+- Keep both aliases routed to `gpt-6.2-sol` with identical reasoning levels and unchanged request effort. Add an explicit wire budget variant for GPT-6.2 Sol only, with both context values set to the declared maximum and the base model's visibility/modalities/reasoning; retain the base wire entry with both budgets. Older Sol wire entries and Astra get no new alias, and no long alias is emitted without declared headroom.
+- Add offline alias/context regression coverage; preserve the 1.12.1 modality ceiling, Codex pins, dependencies, and authentication behavior.
+
 ## 1.12.1
 
 - Limit projected `/wire/v1/models` input modalities to the intersection of the backend declaration and the wrapper-supported text/image surface. Do not advertise audio or unknown future modalities, and do not invent absent capabilities.

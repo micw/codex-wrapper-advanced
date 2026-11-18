@@ -915,6 +915,21 @@ mod tests {
     }
 
     #[test]
+    fn six_two_long_alias_keeps_the_same_request_body_and_effort() {
+        for effort in ["low", "medium", "high", "xhigh", "max"] {
+            let mut base = request(vec![user("Explain the parser.")]);
+            base.model = "gpt-6.2-sol".into();
+            base.effort = Some(effort.into());
+            let mut long = base.clone();
+            long.model = "gpt-6.2-sol:long".into();
+            // The same normalization used by Client::stream before build_body.
+            long.model = crate::models::wire_model(&long.model).to_string();
+            assert_eq!(long.effort, base.effort);
+            assert_eq!(build_body(&long), build_body(&base));
+        }
+    }
+
+    #[test]
     fn native_image_input_reaches_the_upstream_unchanged() {
         let image = json!({
             "type": "message",

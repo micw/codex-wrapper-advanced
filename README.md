@@ -155,7 +155,7 @@ weil `wire::Event` sich noch bewegt.
 ### Womit spreche ich? — `/wire/v1/info`
 
 ```json
-{ "service": "codex-api-wrapper", "version": "1.12.1" }
+{ "service": "codex-api-wrapper", "version": "1.12.2" }
 ```
 
 Mehr nicht, und das ist Absicht:
@@ -234,7 +234,7 @@ Pass-through is not a promise of supported audio handling across wrapper surface
 
 | Feld | Herkunft | Bedeutung |
 |---|---|---|
-| `default_context_length` | `context_window` | womit Codex selbst fährt — im aktuellen Katalog 272 000 für alle Modelle |
+| `default_context_length` | `context_window` | provider-declared default budget — GPT-6.2 Sol: 500 000; the explicit `:long` budget entry uses the declared maximum |
 | `max_context_length` | `max_context_window`, korrigiert | die tatsächlich nutzbare Obergrenze |
 
 Eine Kompaktierungsschwelle liefern wir **nicht** mit. Codex nimmt 90 % seines
@@ -313,6 +313,8 @@ und was möglich ist. Ausgedrückt wird das hier als zweiter Eintrag:
 
 | `id` | `model` (ans Backend) | `context_length` |
 |---|---|---:|
+| `gpt-6.2-sol` | `gpt-6.2-sol` | 500 000 |
+| `gpt-6.2-sol:long` | `gpt-6.2-sol` | 872 000 |
 | `gpt-6.1-sol` | `gpt-6.1-sol` | 272 000 |
 | `gpt-6.1-sol:long` | `gpt-6.1-sol` | 872 000 |
 | `gpt-6-sol` | `gpt-6-sol` | 272 000 |
@@ -326,7 +328,20 @@ budgetiert. Die Variante ist eine **Budgetempfehlung**, keine Fähigkeit, die wi
 zuschalten. Der Suffix wird vor dem Senden abgeschnitten — deshalb sind `id` und
 `model` im Wire-Katalog getrennt.
 
-**Nur für die bisher vermessenen Sol-Modelle.** Berechtigt wären mehrere Modelle (`max > default`), aber
+**Selected Sol models only.** GPT-6.2 Sol's base 500,000 and long 872,000
+budgets come from the official Codex 0.169.1 catalogue, not a new wrapper
+measurement: [`codex-rs/models-manager/models.json` at the pinned upstream commit](https://github.com/openai/codex/blob/c376cf7396eff83ce4c6ac61b9553df142e7a0be/codex-rs/models-manager/models.json#L36-L37).
+The `:long` alias is a wrapper budget label, not a separate upstream model or an
+effort setting; it uses the same model and reasoning levels. Wire discovery keeps
+the base entry with both context values and adds an explicit `gpt-6.2-sol:long`
+budget entry: `id` is the alias, `model` stays `gpt-6.2-sol`, both context values
+use the declared maximum, and the display name ends in `(Long context)`.
+Visibility, supported modalities, and reasoning metadata match the base entry.
+Only this newly requested variant is added to wire discovery; older Sol variants
+remain on `/v1/models` only. Astra receives no long alias. An alias is emitted
+only while the declared maximum exceeds the default.
+
+Berechtigt wären mehrere Modelle (`max > default`), aber
 eine Variante verdoppelt einen Eintrag im Modellwähler für null funktionalen
 Unterschied. Sol ist das Arbeitspferd; für alles andere liefert
 `/wire/v1/models` `max_context_length`, und wer ein anderes Modell mit 872 000 fahren will,
